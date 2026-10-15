@@ -1,20 +1,35 @@
 import os
 import requests
 import pandas as pd
+import numpy as np
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-MONEDAS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
-    "NEARUSDT", "LTCUSDT", "UNIUSDT", "APTUSDT", "SUIUSDT"
-]
+BASE_URL = "https://data-api.binance.vision/api/v3"
 
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
     requests.post(url, json=payload)
+
+def obtener_top_monedas(limite=40):
+    """Obtiene automáticamente las monedas en USDT con mayor volumen real en Binance Spot"""
+    Excluir = ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 'EURUSDT', 'PAXGUSDT']
+    try:
+        r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
+        datos = r.json()
+        pares_usdt = [
+            d for d in datos 
+            if d['symbol'].endswith('USDT') 
+            and d['symbol'] not in Excluir
+            and not any(x in d['symbol'] for x in ['UPUSDT', 'DOWNUSDT', 'BULL', 'BEAR'])
+        ]
+        # Ordenar de mayor a menor volumen en dólares
+        pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
+        return [p['symbol'] for p in pares_ordenados[:limite]]
+    except Exception:
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT"]
 
 def calcular_rsi(series, period=14):
     delta = series.diff()
@@ -23,49 +38,157 @@ def calcular_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def escanear():
-    alertas = []
-    base_url = "https://data-api.binance.vision/api/v3/klines"
-
-    for symbol in MONEDAS:
-        params = {"symbol": symbol, "interval": "1h", "limit": 50}
-        r = requests.get(base_url, params=params)
-        if r.status_code != 200:
-            continue
-            
-        data = r.json()
-        df = pd.DataFrame(data, columns=[
-            'time', 'open', 'high', 'low', 'close', 'vol', 
-            'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'
-        ])
-        df['close'] = df['close'].astype(float)
+def calcular_supertrend(df, period=10, multiplier=3.0):
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/period, adjust=False).mean()
+    
+    hl2 = (high + low) / 2
+    upperband = (hl2 + (multiplier * atr)).values
+    lowerband = (hl2 - (multiplier * atr)).values
+    close_vals = close.values
+    
+    st = np.zeros(len(df))
+    trend = np.ones(len(df)) # 1 = Verde (Alcista), -1 = Rojo (Bajista)
+    
+    for i in range(1, len(df)):
+        if close_vals[i-1] > upperband[i-1]:
+            trend[i] = 1
+        elif close_vals[i-1] < lowerband[i-1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i-1]
+            if trend[i] == 1 and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if trend[i] == -1 and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+                
+        st[i] = lowerband[i] if trend[i] == 1 else upperband[i]
         
-        df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
-        df['RSI'] = calcular_rsi(df['close'], 14)
+    df['ATR'] = atr
+    df['SuperTrend'] = st
+    df['ST_Trend'] = trend
+    return df
 
-        vela_actual = df.iloc[-2]
-        vela_previa = df.iloc[-3]
+def ya_alerto_hoy(symbol):
+    """Revisa si el par ya estuvo en la zona en las últimas 8 horas para NO repetir la alerta"""
+    try:
+        r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "4h", "limit": 3}, timeout=5)
+        velas_4h = r.json()
+        # Si hace 8 horas (vela -3) ya había tocado el mínimo de hoy, ya se alertó en el turno anterior
+        min_anterior = float(velas_4h[-3][3])
+        min_reciente = min(float(velas_4h[-2][3]), float(velas_4h[-1][3]))
+        return min_anterior <= min_reciente * 1.005
+    except Exception:
+        return False
 
-        precio = vela_actual['close']
-        rsi = vela_actual['RSI']
-        ema20 = vela_actual['EMA20']
+def escanear():
+    monedas = obtener_top_monedas(40)
+    alertas = []
 
-        cruce_ema = (vela_previa['close'] < vela_previa['EMA20']) and (precio > ema20)
+    for symbol in monedas:
+        try:
+            r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "1d", "limit": 100}, timeout=10)
+            if r.status_code != 200:
+                continue
+                
+            df = pd.DataFrame(r.json(), columns=[
+                'time', 'open', 'high', 'low', 'close', 'vol', 
+                'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'
+            ])
+            for col in ['open', 'high', 'low', 'close', 'vol']:
+                df[col] = df[col].astype(float)
 
-        if rsi < 35 or cruce_ema:
-            motivo = "RSI menor a 35 (Sobreventa)" if rsi < 35 else "Cruce alcista sobre EMA 20"
-            alertas.append(
-                f"🟢 *{symbol}* (1H)\n"
-                f"• Motivo: {motivo}\n"
-                f"• Precio: `${precio:.4f}`\n"
-                f"• RSI: `{rsi:.1f}` | EMA20: `${ema20:.4f}`"
-            )
+            # 1. Indicadores Diarios (1D)
+            df = calcular_supertrend(df, period=10, multiplier=3.0)
+            df['RSI'] = calcular_rsi(df['close'], 14)
+            df['Vol_SMA20'] = df['vol'].rolling(20).mean()
+
+            # Evaluamos la vela diaria en curso (-1) y la de ayer (-2)
+            hoy = df.iloc[-1]
+            ayer = df.iloc[-2]
+            precio = hoy['close']
+
+            # FILTRO 1: SuperTrend en VERDE (Tendencia alcista en 1D)
+            if hoy['ST_Trend'] != 1:
+                continue
+
+            # Cálculo de Fibonacci del último impulso (últimos 60 días)
+            ventana = df.iloc[-60:]
+            max_impulso = ventana['high'].max()
+            idx_max = ventana['high'].idxmax()
+            # Buscamos el mínimo previo al máximo para asegurar que sea un impulso alcista
+            ventana_previa = df.loc[:idx_max].tail(45)
+            min_impulso = ventana_previa['low'].min()
+            rango = max_impulso - min_impulso
+
+            if rango <= 0 or precio >= max_impulso:
+                continue
+
+            # Niveles de retroceso desde el máximo hacia abajo
+            fib_500 = max_impulso - (rango * 0.500)
+            fib_618 = max_impulso - (rango * 0.618)
+            fib_713 = max_impulso - (rango * 0.713)
+            fib_786 = max_impulso - (rango * 0.786)
+
+            # CONDICIÓN A: Precio en zona Golden Pocket de Fibonacci (entre 58% y 75% de retroceso)
+            en_fibonacci = (fib_786 <= precio <= fib_618 * 1.015) or (fib_713 <= hoy['low'] <= fib_618)
+
+            # CONDICIÓN B: Rebote en soporte de SuperTrend Verde (Precio a menos de 2.5% de la línea)
+            distancia_st = (precio - hoy['SuperTrend']) / hoy['SuperTrend']
+            rebote_supertrend = (0 <= distancia_st <= 0.025)
+
+            # FILTRO DE CALIDAD: RSI sano (entre 32 y 60, sin caída libre) y reacción alcista
+            rsi_sano = 32 <= hoy['RSI'] <= 60
+            vela_reaccion = (precio > hoy['open']) or (ayer['vol'] > ayer['Vol_SMA20'] * 1.2)
+
+            if (en_fibonacci or rebote_supertrend) and rsi_sano and vela_reaccion:
+                # Verificar filtro anti-repetición para no enviar el mismo par 3 veces en el día
+                if ya_alerto_hoy(symbol) andayer['low'] <= fib_618:
+                    continue
+
+                # Cálculo de Stop Loss y Take Profit con ATR
+                atr = hoy['ATR']
+                stop_loss = min(hoy['SuperTrend'], fib_786) - (0.5 * atr)
+                riesgo = precio - stop_loss
+                if riesgo <= 0:
+                    stop_loss = precio - (1.5 * atr)
+                    riesgo = precio - stop_loss
+
+                tp1 = precio + (riesgo * 2.0) # Ratio 1:2
+                tp2 = precio + (riesgo * 3.0) # Ratio 1:3
+                pct_sl = ((stop_loss - precio) / precio) * 100
+                pct_tp1 = ((tp1 - precio) / precio) * 100
+                pct_tp2 = ((tp2 - precio) / precio) * 100
+
+                motivos = []
+                if en_fibonacci:
+                    motivos.append("🎯 Zona Fibonacci (61.8% - 71.3%)")
+                if rebote_supertrend:
+                    motivos.append("🟩 Apoyo en SuperTrend Diario")
+
+                alertas.append(
+                    f"🟢 *SEÑAL SPOT 1D: #{symbol}*\n"
+                    f"🔹 *Entrada:* `${precio:.4f}`\n"
+                    f"📊 *Confluencia:* {' + '.join(motivos)}\n"
+                    f"📈 *RSI (1D):* `{hoy['RSI']:.1f}` | *SuperTrend:* `${hoy['SuperTrend']:.4f}`\n"
+                    f"🛡 *Gestión de Riesgo:*\n"
+                    f"🛑 Stop Loss: `${stop_loss:.4f}` ({pct_sl:.1f}%)\n"
+                    f"🎯 Take Profit 1: `${tp1:.4f}` (+{pct_tp1:.1f}%)\n"
+                    f"🎯 Take Profit 2: `${tp2:.4f}` (+{pct_tp2:.1f}%)"
+                )
+        except Exception:
+            continue
 
     if alertas:
-        mensaje_final = "🚀 *ALERTAS BINANCE (1H)*\n\n" + "\n\n".join(alertas)
-        enviar_telegram(mensaje_final)
-    else:
-        enviar_telegram("🔎 Escaneo 1H completado: Ninguna moneda cumplió la condición en esta vela.")
+        encabezado = "🚀 *OPORTUNIDADES SPOT (VELAS DIARIAS 1D)*\n━━━━━━━━━━━━━━━━━━\n\n"
+        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas))
 
 if __name__ == "__main__":
     escanear()
