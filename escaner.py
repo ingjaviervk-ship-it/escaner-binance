@@ -3,35 +3,42 @@ import requests
 import pandas as pd
 import numpy as np
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-# Detecta si apretaste el botón manual ("workflow_dispatch") o si fue el reloj automático ("schedule")
+TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
+TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "manual")
 
 BASE_URL = "https://data-api.binance.vision/api/v3"
 
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
-    r = requests.post(url, json=payload)
-    print(f"Respuesta Telegram: {r.status_code} - {r.text}")
+    # Usamos HTML en lugar de Markdown para que Telegram nunca bloquee el mensaje por simbolos
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print(f"Estado Telegram: {r.status_code} | Respuesta: {r.text}")
+        if r.status_code != 200:
+            # Si falla por formato, lo envia en texto plano sin formato
+            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}, timeout=10)
+    except Exception as e:
+        print(f"Error de conexion con Telegram: {e}")
 
 def obtener_top_monedas(limite=40):
-    Excluir = ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 'EURUSDT', 'PAXGUSDT']
+    excluir = ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 'EURUSDT', 'PAXGUSDT']
     try:
         r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
-        datos = r.json()
-        pares_usdt = [
-            d for d in datos 
-            if d['symbol'].endswith('USDT') 
-            and d['symbol'] not in Excluir
-            and not any(x in d['symbol'] for x in ['UPUSDT', 'DOWNUSDT', 'BULL', 'BEAR'])
-        ]
-        pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
-        return [p['symbol'] for p in pares_ordenados[:limite]]
+        if r.status_code == 200:
+            datos = r.json()
+            pares_usdt = [
+                d for d in datos 
+                if d['symbol'].endswith('USDT') 
+                and d['symbol'] not in excluir
+                and not any(x in d['symbol'] for x in ['UPUSDT', 'DOWNUSDT', 'BULL', 'BEAR'])
+            ]
+            pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
+            return [p['symbol'] for p in pares_ordenados[:limite]]
     except Exception as e:
-        print(f"Error obteniendo top monedas: {e}")
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT"]
+        print(f"Usando lista base por error en API: {e}")
+    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT", "DOTUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", "APTUSDT"]
 
 def calcular_rsi(series, period=14):
     delta = series.diff()
@@ -91,7 +98,7 @@ def ya_alerto_hoy(symbol):
 def escanear():
     monedas = obtener_top_monedas(40)
     alertas = []
-    resumen_btc = ""
+    resumen_btc = "No disponible"
 
     for symbol in monedas:
         try:
@@ -114,16 +121,13 @@ def escanear():
             ayer = df.iloc[-2]
             precio = hoy['close']
 
-            # Guardamos el estado de BTC por si es una prueba manual
             if symbol == "BTCUSDT":
                 estado_st = "🟩 Alcista" if hoy['ST_Trend'] == 1 else "🟥 Bajista"
-                resumen_btc = f"• *BTCUSDT:* `${precio:.2f}` | RSI 1D: `{hoy['RSI']:.1f}` | SuperTrend: {estado_st}"
+                resumen_btc = f"• <b>BTCUSDT:</b> ${precio:.2f} | RSI 1D: {hoy['RSI']:.1f} | SuperTrend: {estado_st}"
 
-            # FILTRO 1: SuperTrend en VERDE (Tendencia alcista en 1D)
             if hoy['ST_Trend'] != 1:
                 continue
 
-            # Cálculo de Fibonacci del último impulso (últimos 60 días)
             ventana = df.iloc[-60:]
             max_impulso = ventana['high'].max()
             idx_max = ventana['high'].idxmax()
@@ -138,19 +142,14 @@ def escanear():
             fib_713 = max_impulso - (rango * 0.713)
             fib_786 = max_impulso - (rango * 0.786)
 
-            # CONDICIÓN A: Precio en zona Fibonacci (61.8% - 78.6%)
             en_fibonacci = (fib_786 <= precio <= fib_618 * 1.015) or (fib_713 <= hoy['low'] <= fib_618)
-
-            # CONDICIÓN B: Rebote en soporte de SuperTrend Verde (a menos de 2.5% de la línea)
             distancia_st = (precio - hoy['SuperTrend']) / hoy['SuperTrend']
             rebote_supertrend = (0 <= distancia_st <= 0.025)
 
-            # FILTRO DE CALIDAD: RSI sano (32 a 60) y reacción alcista
             rsi_sano = 32 <= hoy['RSI'] <= 60
             vela_reaccion = (precio > hoy['open']) or (ayer['vol'] > ayer['Vol_SMA20'] * 1.2)
 
             if (en_fibonacci or rebote_supertrend) and rsi_sano and vela_reaccion:
-                # Si es automático, aplica el filtro anti-repetición
                 if EVENT_NAME == "schedule" and ya_alerto_hoy(symbol) and ayer['low'] <= fib_618:
                     continue
 
@@ -174,29 +173,28 @@ def escanear():
                     motivos.append("🟩 Apoyo en SuperTrend Diario")
 
                 alertas.append(
-                    f"🟢 *SEÑAL SPOT 1D: #{symbol}*\n"
-                    f"🔹 *Entrada:* `${precio:.4f}`\n"
-                    f"📊 *Confluencia:* {' + '.join(motivos)}\n"
-                    f"📈 *RSI (1D):* `{hoy['RSI']:.1f}` | *SuperTrend:* `${hoy['SuperTrend']:.4f}`\n"
-                    f"🛡 *Gestión de Riesgo:*\n"
-                    f"🛑 Stop Loss: `${stop_loss:.4f}` ({pct_sl:.1f}%)\n"
-                    f"🎯 Take Profit 1: `${tp1:.4f}` (+{pct_tp1:.1f}%)\n"
-                    f"🎯 Take Profit 2: `${tp2:.4f}` (+{pct_tp2:.1f}%)"
+                    f"🟢 <b>SEÑAL SPOT 1D: {symbol}</b>\n"
+                    f"🔹 <b>Entrada:</b> ${precio:.4f}\n"
+                    f"📊 <b>Confluencia:</b> {' + '.join(motivos)}\n"
+                    f"📈 <b>RSI (1D):</b> {hoy['RSI']:.1f} | <b>SuperTrend:</b> ${hoy['SuperTrend']:.4f}\n"
+                    f"🛡 <b>Gestión de Riesgo:</b>\n"
+                    f"🛑 Stop Loss: ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
+                    f"🎯 Take Profit 1: ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
+                    f"🎯 Take Profit 2: ${tp2:.4f} (+{pct_tp2:.1f}%)"
                 )
         except Exception as e:
-            print(f"Error en {symbol}: {e}")
+            print(f"Error analizando {symbol}: {e}")
             continue
 
     if alertas:
-        encabezado = "🚀 *OPORTUNIDADES SPOT (VELAS DIARIAS 1D)*\n━━━━━━━━━━━━━━━━━━\n\n"
+        encabezado = "🚀 <b>OPORTUNIDADES SPOT (VELAS DIARIAS 1D)</b>\n━━━━━━━━━━━━━━━━━━\n\n"
         enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas))
     elif EVENT_NAME != "schedule":
-        # Si apretaste el botón manual y no hubo alertas, te avisa que el sistema funciona bien
         enviar_telegram(
-            f"✅ *Escáner Spot 1D Activo (Prueba Manual)*\n\n"
-            f"Se analizaron las 40 monedas con más volumen de Binance.\n"
+            f"✅ <b>Escáner Spot 1D Activo (Prueba Manual)</b>\n\n"
+            f"Se analizaron las {len(monedas)} monedas con más volumen de Binance.\n"
             f"En este momento ninguna cumple todos los filtros estrictos (SuperTrend Verde + Fibonacci 61.8-71.3%).\n\n"
-            f"📊 *Referencia del mercado hoy:*\n{resumen_btc}"
+            f"📊 <b>Referencia del mercado hoy:</b>\n{resumen_btc}"
         )
 
 if __name__ == "__main__":
