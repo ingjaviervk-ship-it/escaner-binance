@@ -1,8 +1,9 @@
-name: Escaner Cripto Cada Hora
+name: Escaner Spot Diario (3 Veces al Dia)
 
 on:
   schedule:
-    - cron: '2 * * * *'
+    # Se ejecuta a las 00:05, 08:05 y 16:05 UTC (8:05 PM, 4:05 AM y 12:05 PM hora local)
+    - cron: '5 0,8,16 * * *'
   workflow_dispatch:
 
 jobs:
