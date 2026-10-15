@@ -11,18 +11,15 @@ BASE_URL = "https://data-api.binance.vision/api/v3"
 
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # Usamos HTML en lugar de Markdown para que Telegram nunca bloquee el mensaje por simbolos
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"Estado Telegram: {r.status_code} | Respuesta: {r.text}")
         if r.status_code != 200:
-            # Si falla por formato, lo envia en texto plano sin formato
             requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}, timeout=10)
     except Exception as e:
-        print(f"Error de conexion con Telegram: {e}")
+        print(f"Error Telegram: {e}")
 
-def obtener_top_monedas(limite=40):
+def obtener_top_monedas(limite=50):
     excluir = ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 'EURUSDT', 'PAXGUSDT']
     try:
         r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
@@ -36,8 +33,8 @@ def obtener_top_monedas(limite=40):
             ]
             pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
             return [p['symbol'] for p in pares_ordenados[:limite]]
-    except Exception as e:
-        print(f"Usando lista base por error en API: {e}")
+    except Exception:
+        pass
     return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT", "DOTUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", "APTUSDT"]
 
 def calcular_rsi(series, period=14):
@@ -48,10 +45,7 @@ def calcular_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calcular_supertrend(df, period=10, multiplier=3.0):
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
+    high, low, close = df['high'], df['low'], df['close']
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -77,7 +71,6 @@ def calcular_supertrend(df, period=10, multiplier=3.0):
                 lowerband[i] = lowerband[i-1]
             if trend[i] == -1 and upperband[i] > upperband[i-1]:
                 upperband[i] = upperband[i-1]
-                
         st[i] = lowerband[i] if trend[i] == 1 else upperband[i]
         
     df['ATR'] = atr
@@ -85,20 +78,23 @@ def calcular_supertrend(df, period=10, multiplier=3.0):
     df['ST_Trend'] = trend
     return df
 
-def ya_alerto_hoy(symbol):
-    try:
-        r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "4h", "limit": 3}, timeout=5)
-        velas_4h = r.json()
-        min_anterior = float(velas_4h[-3][3])
-        min_reciente = min(float(velas_4h[-2][3]), float(velas_4h[-1][3]))
-        return min_anterior <= min_reciente * 1.005
-    except Exception:
-        return False
+def detectar_soportes_resistencias(df):
+    """Detecta pisos (soportes) y techos (resistencias) historicos con pivotes de 5 dias"""
+    soportes = []
+    resistencias = []
+    # Analizamos hasta hace 3 dias para tener pivotes confirmados
+    for i in range(5, len(df) - 3):
+        es_piso = df['low'].iloc[i] == df['low'].iloc[i-5:i+4].min()
+        es_techo = df['high'].iloc[i] == df['high'].iloc[i-5:i+4].max()
+        if es_piso:
+            soportes.append(df['low'].iloc[i])
+        if es_techo:
+            resistencias.append(df['high'].iloc[i])
+    return soportes, resistencias
 
 def escanear():
-    monedas = obtener_top_monedas(40)
+    monedas = obtener_top_monedas(50)
     alertas = []
-    resumen_btc = "No disponible"
 
     for symbol in monedas:
         try:
@@ -120,14 +116,21 @@ def escanear():
             hoy = df.iloc[-1]
             ayer = df.iloc[-2]
             precio = hoy['close']
+            rsi = hoy['RSI']
 
-            if symbol == "BTCUSDT":
-                estado_st = "🟩 Alcista" if hoy['ST_Trend'] == 1 else "🟥 Bajista"
-                resumen_btc = f"• <b>BTCUSDT:</b> ${precio:.2f} | RSI 1D: {hoy['RSI']:.1f} | SuperTrend: {estado_st}"
-
-            if hoy['ST_Trend'] != 1:
+            # Filtro base de seguridad para todas: que no este en desplome libre (RSI >= 34) y muestre freno/reaccion
+            vela_freno = (precio >= hoy['open']) or ((precio - hoy['low']) > (hoy['high'] - hoy['low']) * 0.4)
+            if rsi < 34 or not vela_freno:
                 continue
 
+            motivos = []
+
+            # MOTOR 1: Rebote en SuperTrend Verde (Independiente)
+            distancia_st = (precio - hoy['SuperTrend']) / hoy['SuperTrend']
+            if hoy['ST_Trend'] == 1 and (0 <= distancia_st <= 0.03) and rsi <= 62:
+                motivos.append(f"🟩 Apoyo SuperTrend (${hoy['SuperTrend']:.4f})")
+
+            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Independiente)
             ventana = df.iloc[-60:]
             max_impulso = ventana['high'].max()
             idx_max = ventana['high'].idxmax()
@@ -135,67 +138,70 @@ def escanear():
             min_impulso = ventana_previa['low'].min()
             rango = max_impulso - min_impulso
 
-            if rango <= 0 or precio >= max_impulso:
-                continue
+            fib_786 = precio * 0.95
+            if rango > 0 and precio < max_impulso:
+                fib_618 = max_impulso - (rango * 0.618)
+                fib_713 = max_impulso - (rango * 0.713)
+                fib_786 = max_impulso - (rango * 0.786)
+                if (fib_786 <= precio <= fib_618 * 1.01) or (fib_713 <= hoy['low'] <= fib_618):
+                    motivos.append(f"🎯 Zona Fibonacci 61.8-71.3% (${fib_618:.4f})")
 
-            fib_618 = max_impulso - (rango * 0.618)
-            fib_713 = max_impulso - (rango * 0.713)
-            fib_786 = max_impulso - (rango * 0.786)
+            # MOTOR 3: Soportes y Resistencias (Independiente)
+            soportes, resistencias = detectar_soportes_resistencias(df.iloc[-65:])
+            soporte_cercano = None
+            for s in reversed(soportes):
+                # Si el precio actual esta apoyado a menos de 1.8% por encima de un piso historico
+                if 0 <= (precio - s) / s <= 0.018:
+                    soporte_cercano = s
+                    motivos.append(f"🧱 Rebote en Soporte Clave (${s:.4f})")
+                    break
 
-            en_fibonacci = (fib_786 <= precio <= fib_618 * 1.015) or (fib_713 <= hoy['low'] <= fib_618)
-            distancia_st = (precio - hoy['SuperTrend']) / hoy['SuperTrend']
-            rebote_supertrend = (0 <= distancia_st <= 0.025)
+            # Tambien revisa Retesteo (Antiguo techo roto que ahora funciona como piso)
+            if not soporte_cercano:
+                for res in reversed(resistencias):
+                    if 0 <= (precio - res) / res <= 0.018 and df['close'].iloc[-5:-1].max() > res:
+                        soporte_cercano = res
+                        motivos.append(f"🔄 Retesteo de Techo Roto (${res:.4f})")
+                        break
 
-            rsi_sano = 32 <= hoy['RSI'] <= 60
-            vela_reaccion = (precio > hoy['open']) or (ayer['vol'] > ayer['Vol_SMA20'] * 1.2)
-
-            if (en_fibonacci or rebote_supertrend) and rsi_sano and vela_reaccion:
-                if EVENT_NAME == "schedule" and ya_alerto_hoy(symbol) and ayer['low'] <= fib_618:
-                    continue
-
+            # Si cumplio AL MENOS UNO de los 3 motores independientes, dispara la señal
+            if motivos:
                 atr = hoy['ATR']
-                stop_loss = min(hoy['SuperTrend'], fib_786) - (0.5 * atr)
-                riesgo = precio - stop_loss
-                if riesgo <= 0:
-                    stop_loss = precio - (1.5 * atr)
-                    riesgo = precio - stop_loss
+                stop_loss = precio - (1.5 * atr)
+                
+                # Busca el proximo techo (resistencia) por encima del precio actual
+                techos_arriba = [r for r in resistencias if r > precio * 1.03]
+                techo_ref = min(techos_arriba) if techos_arriba else (precio + (atr * 3.0))
 
+                riesgo = precio - stop_loss
                 tp1 = precio + (riesgo * 2.0)
-                tp2 = precio + (riesgo * 3.0)
+                tp2 = max(techo_ref, precio + (riesgo * 3.0))
+
                 pct_sl = ((stop_loss - precio) / precio) * 100
                 pct_tp1 = ((tp1 - precio) / precio) * 100
                 pct_tp2 = ((tp2 - precio) / precio) * 100
 
-                motivos = []
-                if en_fibonacci:
-                    motivos.append("🎯 Zona Fibonacci (61.8% - 71.3%)")
-                if rebote_supertrend:
-                    motivos.append("🟩 Apoyo en SuperTrend Diario")
+                etiqueta = "🔥 <b>CONFLUENCIA MULTIPLE</b>" if len(motivos) > 1 else "🟢 <b>SEÑAL SPOT 1D</b>"
 
                 alertas.append(
-                    f"🟢 <b>SEÑAL SPOT 1D: {symbol}</b>\n"
-                    f"🔹 <b>Entrada:</b> ${precio:.4f}\n"
-                    f"📊 <b>Confluencia:</b> {' + '.join(motivos)}\n"
-                    f"📈 <b>RSI (1D):</b> {hoy['RSI']:.1f} | <b>SuperTrend:</b> ${hoy['SuperTrend']:.4f}\n"
-                    f"🛡 <b>Gestión de Riesgo:</b>\n"
-                    f"🛑 Stop Loss: ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
-                    f"🎯 Take Profit 1: ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
-                    f"🎯 Take Profit 2: ${tp2:.4f} (+{pct_tp2:.1f}%)"
+                    f"{etiqueta}: <b>{symbol}</b>\n"
+                    f"🔹 <b>Precio Real:</b> ${precio:.4f}\n"
+                    f"📊 <b>Motor:</b> {' + '.join(motivos)}\n"
+                    f"📈 <b>RSI (1D):</b> {rsi:.1f}\n"
+                    f"🏛 <b>Próximo Techo (Resistencia):</b> ${techo_ref:.4f}\n"
+                    f"🛑 <b>Stop Loss:</b> ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
+                    f"🎯 <b>Take Profit 1:</b> ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
+                    f"🎯 <b>Take Profit 2:</b> ${tp2:.4f} (+{pct_tp2:.1f}%)"
                 )
-        except Exception as e:
-            print(f"Error analizando {symbol}: {e}")
+        except Exception:
             continue
 
     if alertas:
-        encabezado = "🚀 <b>OPORTUNIDADES SPOT (VELAS DIARIAS 1D)</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas))
-    elif EVENT_NAME != "schedule":
-        enviar_telegram(
-            f"✅ <b>Escáner Spot 1D Activo (Prueba Manual)</b>\n\n"
-            f"Se analizaron las {len(monedas)} monedas con más volumen de Binance.\n"
-            f"En este momento ninguna cumple todos los filtros estrictos (SuperTrend Verde + Fibonacci 61.8-71.3%).\n\n"
-            f"📊 <b>Referencia del mercado hoy:</b>\n{resumen_btc}"
-        )
+        # Enviamos las mejores (maximo 10 por mensaje para no saturar)
+        encabezado = f"🚀 <b>ESCANEO EN VIVO BINANCE (1D)</b>\nMonedas que cumplen hoy ({len(alertas)}):\n━━━━━━━━━━━━━━━━━━\n\n"
+        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:10]))
+    else:
+        enviar_telegram("🔎 Escaneo 1D completado: Ninguna de las 50 monedas principales está apoyada en SuperTrend, Fibonacci o Soporte en este instante.")
 
 if __name__ == "__main__":
     escanear()
