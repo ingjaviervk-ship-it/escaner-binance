@@ -5,7 +5,6 @@ import numpy as np
 
 TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME", "manual")
 
 BASE_URL = "https://data-api.binance.vision/api/v3"
 
@@ -19,8 +18,11 @@ def enviar_telegram(mensaje):
     except Exception as e:
         print(f"Error Telegram: {e}")
 
-def obtener_top_monedas(limite=50):
-    excluir = ['USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 'EURUSDT', 'PAXGUSDT']
+def obtener_top_monedas(limite=60):
+    excluir = [
+        'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 
+        'EURUSDT', 'PAXGUSDT', 'USD1USDT', 'USDEUSDT', 'BUSDUSDT'
+    ]
     try:
         r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
         if r.status_code == 200:
@@ -79,13 +81,12 @@ def calcular_supertrend(df, period=10, multiplier=3.0):
     return df
 
 def detectar_soportes_resistencias(df):
-    """Detecta pisos (soportes) y techos (resistencias) historicos con pivotes de 5 dias"""
+    """Detecta pisos (soportes) y techos (resistencias) con ventana de 3 dias a cada lado"""
     soportes = []
     resistencias = []
-    # Analizamos hasta hace 3 dias para tener pivotes confirmados
-    for i in range(5, len(df) - 3):
-        es_piso = df['low'].iloc[i] == df['low'].iloc[i-5:i+4].min()
-        es_techo = df['high'].iloc[i] == df['high'].iloc[i-5:i+4].max()
+    for i in range(3, len(df) - 2):
+        es_piso = df['low'].iloc[i] == df['low'].iloc[i-3:i+3].min()
+        es_techo = df['high'].iloc[i] == df['high'].iloc[i-3:i+3].max()
         if es_piso:
             soportes.append(df['low'].iloc[i])
         if es_techo:
@@ -93,8 +94,9 @@ def detectar_soportes_resistencias(df):
     return soportes, resistencias
 
 def escanear():
-    monedas = obtener_top_monedas(50)
+    monedas = obtener_top_monedas(60)
     alertas = []
+    cercanas = []
 
     for symbol in monedas:
         try:
@@ -111,69 +113,81 @@ def escanear():
 
             df = calcular_supertrend(df, period=10, multiplier=3.0)
             df['RSI'] = calcular_rsi(df['close'], 14)
-            df['Vol_SMA20'] = df['vol'].rolling(20).mean()
 
             hoy = df.iloc[-1]
             ayer = df.iloc[-2]
             precio = hoy['close']
+            min_hoy = min(hoy['low'], ayer['low']) # Incluye lo que toco hace unas horas
             rsi = hoy['RSI']
 
-            # Filtro base de seguridad para todas: que no este en desplome libre (RSI >= 34) y muestre freno/reaccion
-            vela_freno = (precio >= hoy['open']) or ((precio - hoy['low']) > (hoy['high'] - hoy['low']) * 0.4)
-            if rsi < 34 or not vela_freno:
+            # Filtro anticaida libre: RSI mayor a 30
+            if rsi < 30:
                 continue
 
             motivos = []
 
-            # MOTOR 1: Rebote en SuperTrend Verde (Independiente)
-            distancia_st = (precio - hoy['SuperTrend']) / hoy['SuperTrend']
-            if hoy['ST_Trend'] == 1 and (0 <= distancia_st <= 0.03) and rsi <= 62:
-                motivos.append(f"🟩 Apoyo SuperTrend (${hoy['SuperTrend']:.4f})")
+            # MOTOR 1: Rebote en SuperTrend Verde (revisando la mecha del dia)
+            st_val = hoy['SuperTrend']
+            dist_min_st = (hoy['low'] - st_val) / st_val
+            dist_precio_st = (precio - st_val) / st_val
 
-            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Independiente)
+            if hoy['ST_Trend'] == 1 and st_val > 0:
+                # Si la mecha de hoy se acerco a menos de 2.5% del SuperTrend y el precio actual sigue por encima (hasta 5.5%)
+                if (-0.005 <= dist_min_st <= 0.025) and (0 <= dist_precio_st <= 0.055) and rsi <= 65:
+                    motivos.append(f"🟩 Toque en SuperTrend (${st_val:.4f})")
+                elif 0 < dist_precio_st <= 0.08:
+                    cercanas.append((dist_precio_st * 100, f"• <b>{symbol}</b> (${precio:.4f}) a +{dist_precio_st*100:.1f}% de su SuperTrend Verde"))
+
+            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Impulso Alcista Real)
             ventana = df.iloc[-60:]
-            max_impulso = ventana['high'].max()
-            idx_max = ventana['high'].idxmax()
-            ventana_previa = df.loc[:idx_max].tail(45)
-            min_impulso = ventana_previa['low'].min()
+            min_impulso = ventana['low'].min()
+            idx_min = ventana['low'].idxmin()
+            ventana_post = df.loc[idx_min:]
+            max_impulso = ventana_post['high'].max()
             rango = max_impulso - min_impulso
 
-            fib_786 = precio * 0.95
-            if rango > 0 and precio < max_impulso:
+            if rango > 0 and len(ventana_post) >= 4 and precio < max_impulso * 0.96:
                 fib_618 = max_impulso - (rango * 0.618)
                 fib_713 = max_impulso - (rango * 0.713)
                 fib_786 = max_impulso - (rango * 0.786)
-                if (fib_786 <= precio <= fib_618 * 1.01) or (fib_713 <= hoy['low'] <= fib_618):
-                    motivos.append(f"🎯 Zona Fibonacci 61.8-71.3% (${fib_618:.4f})")
+                
+                # Si el precio actual o la mecha de hoy toco la zona 61.8% - 78.6% y se mantiene sobre el 78.6%
+                toco_fib = (fib_786 * 0.99 <= hoy['low'] <= fib_618 * 1.015) and (precio >= fib_786) and (precio <= fib_618 * 1.03)
+                if toco_fib:
+                    motivos.append(f"🎯 Toque Fib 61.8-71.3% (${fib_713:.4f} - ${fib_618:.4f})")
 
-            # MOTOR 3: Soportes y Resistencias (Independiente)
+            # MOTOR 3: Soportes y Resistencias (Pisos y Retesteos con mecha del dia)
             soportes, resistencias = detectar_soportes_resistencias(df.iloc[-65:])
-            soporte_cercano = None
+            soporte_usado = False
             for s in reversed(soportes):
-                # Si el precio actual esta apoyado a menos de 1.8% por encima de un piso historico
-                if 0 <= (precio - s) / s <= 0.018:
-                    soporte_cercano = s
-                    motivos.append(f"🧱 Rebote en Soporte Clave (${s:.4f})")
+                dist_mecha = (hoy['low'] - s) / s
+                dist_cierre = (precio - s) / s
+                # La mecha toco el soporte (-0.8% a +2%) y el precio reboto manteniendose arriba (0% a +4%)
+                if (-0.008 <= dist_mecha <= 0.02) and (0 <= dist_cierre <= 0.04):
+                    motivos.append(f"🧱 Rebote en Soporte (${s:.4f})")
+                    soporte_usado = True
                     break
 
-            # Tambien revisa Retesteo (Antiguo techo roto que ahora funciona como piso)
-            if not soporte_cercano:
+            if not soporte_usado:
                 for res in reversed(resistencias):
-                    if 0 <= (precio - res) / res <= 0.018 and df['close'].iloc[-5:-1].max() > res:
-                        soporte_cercano = res
+                    dist_mecha = (hoy['low'] - res) / res
+                    dist_cierre = (precio - res) / res
+                    if (-0.008 <= dist_mecha <= 0.02) and (0 <= dist_cierre <= 0.04) and df['high'].iloc[-7:-1].max() > res * 1.02:
                         motivos.append(f"🔄 Retesteo de Techo Roto (${res:.4f})")
                         break
 
-            # Si cumplio AL MENOS UNO de los 3 motores independientes, dispara la señal
+            # Si cumplio AL MENOS UNO de los 3 motores
             if motivos:
                 atr = hoy['ATR']
-                stop_loss = precio - (1.5 * atr)
-                
-                # Busca el proximo techo (resistencia) por encima del precio actual
+                stop_loss = min(hoy['low'], precio - (1.2 * atr)) - (0.3 * atr)
+                riesgo = precio - stop_loss
+                if riesgo <= 0:
+                    stop_loss = precio - (1.5 * atr)
+                    riesgo = precio - stop_loss
+
                 techos_arriba = [r for r in resistencias if r > precio * 1.03]
                 techo_ref = min(techos_arriba) if techos_arriba else (precio + (atr * 3.0))
 
-                riesgo = precio - stop_loss
                 tp1 = precio + (riesgo * 2.0)
                 tp2 = max(techo_ref, precio + (riesgo * 3.0))
 
@@ -185,10 +199,10 @@ def escanear():
 
                 alertas.append(
                     f"{etiqueta}: <b>{symbol}</b>\n"
-                    f"🔹 <b>Precio Real:</b> ${precio:.4f}\n"
+                    f"🔹 <b>Precio Actual:</b> ${precio:.4f} <i>(Mín hoy: ${hoy['low']:.4f})</i>\n"
                     f"📊 <b>Motor:</b> {' + '.join(motivos)}\n"
                     f"📈 <b>RSI (1D):</b> {rsi:.1f}\n"
-                    f"🏛 <b>Próximo Techo (Resistencia):</b> ${techo_ref:.4f}\n"
+                    f"🏛 <b>Próximo Techo:</b> ${techo_ref:.4f}\n"
                     f"🛑 <b>Stop Loss:</b> ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
                     f"🎯 <b>Take Profit 1:</b> ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
                     f"🎯 <b>Take Profit 2:</b> ${tp2:.4f} (+{pct_tp2:.1f}%)"
@@ -197,11 +211,15 @@ def escanear():
             continue
 
     if alertas:
-        # Enviamos las mejores (maximo 10 por mensaje para no saturar)
-        encabezado = f"🚀 <b>ESCANEO EN VIVO BINANCE (1D)</b>\nMonedas que cumplen hoy ({len(alertas)}):\n━━━━━━━━━━━━━━━━━━\n\n"
-        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:10]))
+        encabezado = f"🚀 <b>OPORTUNIDADES SPOT DETECTADAS (1D)</b>\nTotal hoy: {len(alertas)} monedas\n━━━━━━━━━━━━━━━━━━\n\n"
+        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:12]))
     else:
-        enviar_telegram("🔎 Escaneo 1D completado: Ninguna de las 50 monedas principales está apoyada en SuperTrend, Fibonacci o Soporte en este instante.")
+        cercanas_ordenadas = [x[1] for x in sorted(cercanas, key=lambda x: x[0])[:5]]
+        texto_cercanas = "\n".join(cercanas_ordenadas) if cercanas_ordenadas else "Sin monedas cercanas al SuperTrend."
+        enviar_telegram(
+            f"🔎 <b>Escaneo 1D completado (60 monedas)</b>\n"
+            f"Ninguna tocó zona hoy, pero estas son las más cercanas a su soporte de SuperTrend:\n\n{texto_cercanas}"
+        )
 
 if __name__ == "__main__":
     escanear()
