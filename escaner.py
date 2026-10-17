@@ -34,10 +34,14 @@ def obtener_top_monedas(limite=60):
                 and not any(x in d['symbol'] for x in ['UPUSDT', 'DOWNUSDT', 'BULL', 'BEAR'])
             ]
             pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
-            return [p['symbol'] for p in pares_ordenados[:limite]]
+            lista = [p['symbol'] for p in pares_ordenados[:limite]]
+            for fijo in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "AVAXUSDT", "BNBUSDT"]:
+                if fijo not in lista:
+                    lista.append(fijo)
+            return lista
     except Exception:
         pass
-    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT", "DOTUSDT", "NEARUSDT", "LTCUSDT", "UNIUSDT", "APTUSDT"]
+    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT"]
 
 def calcular_rsi(series, period=14):
     delta = series.diff()
@@ -47,33 +51,54 @@ def calcular_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def calcular_supertrend(df, period=10, multiplier=3.0):
-    high, low, close = df['high'], df['low'], df['close']
+    """Calibrado exactamente con SUPERTREND(10,3) de la app de Binance"""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # ATR de Wilder (RMA) identico al usado en Binance
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
     
     hl2 = (high + low) / 2
-    upperband = (hl2 + (multiplier * atr)).values
-    lowerband = (hl2 - (multiplier * atr)).values
+    basic_ub = (hl2 + (multiplier * atr)).values
+    basic_lb = (hl2 - (multiplier * atr)).values
     close_vals = close.values
     
+    final_ub = np.zeros(len(df))
+    final_lb = np.zeros(len(df))
     st = np.zeros(len(df))
-    trend = np.ones(len(df))
+    trend = np.ones(len(df)) # 1 = Verde, -1 = Rojo
+    
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
     
     for i in range(1, len(df)):
-        if close_vals[i-1] > upperband[i-1]:
+        # Banda superior
+        if basic_ub[i] < final_ub[i-1] or close_vals[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        # Banda inferior (Soporte Verde)
+        if basic_lb[i] > final_lb[i-1] or close_vals[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+            
+        # Direccion de tendencia evaluada en la vela actual (como en Binance)
+        if trend[i-1] == -1 and close_vals[i] > final_ub[i-1]:
             trend[i] = 1
-        elif close_vals[i-1] < lowerband[i-1]:
+        elif trend[i-1] == 1 and close_vals[i] < final_lb[i-1]:
             trend[i] = -1
         else:
             trend[i] = trend[i-1]
-            if trend[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if trend[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        st[i] = lowerband[i] if trend[i] == 1 else upperband[i]
+            
+        st[i] = final_lb[i] if trend[i] == 1 else final_ub[i]
         
     df['ATR'] = atr
     df['SuperTrend'] = st
@@ -81,26 +106,43 @@ def calcular_supertrend(df, period=10, multiplier=3.0):
     return df
 
 def detectar_soportes_resistencias(df):
-    """Detecta pisos (soportes) y techos (resistencias) con ventana de 3 dias a cada lado"""
-    soportes = []
-    resistencias = []
+    soportes, resistencias = [], []
     for i in range(3, len(df) - 2):
-        es_piso = df['low'].iloc[i] == df['low'].iloc[i-3:i+3].min()
-        es_techo = df['high'].iloc[i] == df['high'].iloc[i-3:i+3].max()
-        if es_piso:
+        if df['low'].iloc[i] == df['low'].iloc[i-3:i+3].min():
             soportes.append(df['low'].iloc[i])
-        if es_techo:
+        if df['high'].iloc[i] == df['high'].iloc[i-3:i+3].max():
             resistencias.append(df['high'].iloc[i])
     return soportes, resistencias
+
+def detectar_patrones(hoy, ayer, soportes):
+    patrones = []
+    for nombre, v in [("Hoy", hoy), ("Vela Previa", ayer)]:
+        cuerpo = abs(v['close'] - v['open'])
+        rango = v['high'] - v['low']
+        mecha_inf = min(v['open'], v['close']) - v['low']
+        mecha_sup = v['high'] - max(v['open'], v['close'])
+        if rango > 0 and mecha_inf >= (cuerpo * 1.8) and mecha_inf > mecha_sup * 1.4:
+            patrones.append(f"🔨 Martillo ({nombre})")
+            break
+
+    if (ayer['close'] < ayer['open']) and (hoy['close'] > hoy['open']) and (hoy['close'] >= ayer['open']):
+        patrones.append("🕯 Envolvente Alcista")
+
+    for p in soportes[-3:]:
+        if abs(min(hoy['low'], ayer['low']) - p) / p <= 0.015 and hoy['close'] > p:
+            patrones.append("📐 Doble Piso (W)")
+            break
+    return patrones
 
 def escanear():
     monedas = obtener_top_monedas(60)
     alertas = []
-    cercanas = []
+    radar_verdes = []
+    diag_xrp = ""
 
     for symbol in monedas:
         try:
-            r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "1d", "limit": 100}, timeout=10)
+            r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "1d", "limit": 120}, timeout=10)
             if r.status_code != 200:
                 continue
                 
@@ -116,30 +158,41 @@ def escanear():
 
             hoy = df.iloc[-1]
             ayer = df.iloc[-2]
+            
             precio = hoy['close']
-            min_hoy = min(hoy['low'], ayer['low']) # Incluye lo que toco hace unas horas
+            min_2dias = min(hoy['low'], ayer['low'])
             rsi = hoy['RSI']
+            st_hoy = hoy['SuperTrend']
+            st_ayer = ayer['SuperTrend']
 
-            # Filtro anticaida libre: RSI mayor a 30
-            if rsi < 30:
+            if st_hoy <= 0:
+                continue
+
+            if symbol == "XRPUSDT":
+                color_xrp = "🟩 Verde" if hoy['ST_Trend'] == 1 else "🟥 Rojo"
+                diag_xrp = f"\n🔎 <b>Datos leídos en XRPUSDT:</b> Precio ${precio:.4f} | ST: ${st_hoy:.4f} ({color_xrp}) | Mín 48h: ${min_2dias:.4f} | RSI: {rsi:.1f}"
+
+            # RADAR: UNICAMENTE monedas con SuperTrend VERDE
+            if hoy['ST_Trend'] == 1 and precio >= st_hoy * 0.99:
+                dist_verde = (precio - st_hoy) / st_hoy
+                radar_verdes.append((abs(dist_verde) * 100, f"• <b>{symbol}</b> (${precio:.4f}) a <b>{dist_verde*100:+.2f}%</b> de ST Verde 🟩 (${st_hoy:.4f})"))
+
+            if rsi < 28:
                 continue
 
             motivos = []
 
-            # MOTOR 1: Rebote en SuperTrend Verde (revisando la mecha del dia)
-            st_val = hoy['SuperTrend']
-            dist_min_st = (hoy['low'] - st_val) / st_val
-            dist_precio_st = (precio - st_val) / st_val
+            # MOTOR 1: SuperTrend VERDE (Permite mechazo de hasta -3.5% como el 1.2891 de XRP si el precio recupera)
+            toco_st_hoy = (hoy['ST_Trend'] == 1) and (-0.035 <= (hoy['low'] - st_hoy) / st_hoy <= 0.035)
+            toco_st_ayer = (ayer['ST_Trend'] == 1) and (-0.035 <= (ayer['low'] - st_ayer) / st_ayer <= 0.035)
+            sigue_sobre_st = (hoy['ST_Trend'] == 1) and (-0.005 <= (precio - st_hoy) / st_hoy <= 0.06)
 
-            if hoy['ST_Trend'] == 1 and st_val > 0:
-                # Si la mecha de hoy se acerco a menos de 2.5% del SuperTrend y el precio actual sigue por encima (hasta 5.5%)
-                if (-0.005 <= dist_min_st <= 0.025) and (0 <= dist_precio_st <= 0.055) and rsi <= 65:
-                    motivos.append(f"🟩 Toque en SuperTrend (${st_val:.4f})")
-                elif 0 < dist_precio_st <= 0.08:
-                    cercanas.append((dist_precio_st * 100, f"• <b>{symbol}</b> (${precio:.4f}) a +{dist_precio_st*100:.1f}% de su SuperTrend Verde"))
+            if (toco_st_hoy or toco_st_ayer) and sigue_sobre_st and rsi <= 66:
+                momento = "Hoy" if toco_st_hoy else "Vela Previa"
+                motivos.append(f"🟩 Apoyo SuperTrend Verde ({momento}: ${st_hoy:.4f})")
 
-            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Impulso Alcista Real)
-            ventana = df.iloc[-60:]
+            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Hoy + Vela Previa)
+            ventana = df.iloc[-65:]
             min_impulso = ventana['low'].min()
             idx_min = ventana['low'].idxmin()
             ventana_post = df.loc[idx_min:]
@@ -151,35 +204,35 @@ def escanear():
                 fib_713 = max_impulso - (rango * 0.713)
                 fib_786 = max_impulso - (rango * 0.786)
                 
-                # Si el precio actual o la mecha de hoy toco la zona 61.8% - 78.6% y se mantiene sobre el 78.6%
-                toco_fib = (fib_786 * 0.99 <= hoy['low'] <= fib_618 * 1.015) and (precio >= fib_786) and (precio <= fib_618 * 1.03)
-                if toco_fib:
-                    motivos.append(f"🎯 Toque Fib 61.8-71.3% (${fib_713:.4f} - ${fib_618:.4f})")
+                toco_fib_2dias = (fib_786 * 0.985 <= min_2dias <= fib_618 * 1.025) and (fib_786 <= precio <= fib_618 * 1.045)
+                if toco_fib_2dias:
+                    motivos.append(f"🎯 Zona Fib 61.8-71.3% (${fib_713:.4f} - ${fib_618:.4f})")
 
-            # MOTOR 3: Soportes y Resistencias (Pisos y Retesteos con mecha del dia)
+            # MOTOR 3: Soportes y Resistencias (Hoy + Vela Previa)
             soportes, resistencias = detectar_soportes_resistencias(df.iloc[-65:])
             soporte_usado = False
             for s in reversed(soportes):
-                dist_mecha = (hoy['low'] - s) / s
-                dist_cierre = (precio - s) / s
-                # La mecha toco el soporte (-0.8% a +2%) y el precio reboto manteniendose arriba (0% a +4%)
-                if (-0.008 <= dist_mecha <= 0.02) and (0 <= dist_cierre <= 0.04):
+                toco_soporte = (-0.015 <= (hoy['low'] - s) / s <= 0.022) or (-0.015 <= (ayer['low'] - s) / s <= 0.022)
+                en_rebote = (-0.003 <= (precio - s) / s <= 0.05)
+                if toco_soporte and en_rebote:
                     motivos.append(f"🧱 Rebote en Soporte (${s:.4f})")
                     soporte_usado = True
                     break
 
             if not soporte_usado:
                 for res in reversed(resistencias):
-                    dist_mecha = (hoy['low'] - res) / res
-                    dist_cierre = (precio - res) / res
-                    if (-0.008 <= dist_mecha <= 0.02) and (0 <= dist_cierre <= 0.04) and df['high'].iloc[-7:-1].max() > res * 1.02:
-                        motivos.append(f"🔄 Retesteo de Techo Roto (${res:.4f})")
+                    toco_retest = (-0.015 <= (hoy['low'] - res) / res <= 0.022) or (-0.015 <= (ayer['low'] - res) / res <= 0.022)
+                    en_rebote = (-0.003 <= (precio - res) / res <= 0.05)
+                    if toco_retest and en_rebote and df['high'].iloc[-8:-1].max() > res * 1.02:
+                        motivos.append(f"🔄 Retesteo Techo Roto (${res:.4f})")
                         break
 
-            # Si cumplio AL MENOS UNO de los 3 motores
             if motivos:
+                patrones = detectar_patrones(hoy, ayer, soportes)
+                txt_patron = f"\n🕯 <b>Patrón:</b> {' + '.join(patrones)}" if patrones else ""
+
                 atr = hoy['ATR']
-                stop_loss = min(hoy['low'], precio - (1.2 * atr)) - (0.3 * atr)
+                stop_loss = min(min_2dias, precio - (1.2 * atr)) - (0.3 * atr)
                 riesgo = precio - stop_loss
                 if riesgo <= 0:
                     stop_loss = precio - (1.5 * atr)
@@ -195,13 +248,13 @@ def escanear():
                 pct_tp1 = ((tp1 - precio) / precio) * 100
                 pct_tp2 = ((tp2 - precio) / precio) * 100
 
-                etiqueta = "🔥 <b>CONFLUENCIA MULTIPLE</b>" if len(motivos) > 1 else "🟢 <b>SEÑAL SPOT 1D</b>"
+                etiqueta = "🔥 <b>CONFLUENCIA MULTIPLE</b>" if (len(motivos) > 1 or patrones) else "🟢 <b>SEÑAL SPOT 1D</b>"
 
                 alertas.append(
                     f"{etiqueta}: <b>{symbol}</b>\n"
-                    f"🔹 <b>Precio Actual:</b> ${precio:.4f} <i>(Mín hoy: ${hoy['low']:.4f})</i>\n"
-                    f"📊 <b>Motor:</b> {' + '.join(motivos)}\n"
-                    f"📈 <b>RSI (1D):</b> {rsi:.1f}\n"
+                    f"🔹 <b>Precio Actual:</b> ${precio:.4f} <i>(Mín 48h: ${min_2dias:.4f})</i>\n"
+                    f"📊 <b>Motor:</b> {' + '.join(motivos)}{txt_patron}\n"
+                    f"📈 <b>RSI (1D):</b> {rsi:.1f} | <b>ST:</b> ${st_hoy:.4f}\n"
                     f"🏛 <b>Próximo Techo:</b> ${techo_ref:.4f}\n"
                     f"🛑 <b>Stop Loss:</b> ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
                     f"🎯 <b>Take Profit 1:</b> ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
@@ -210,15 +263,18 @@ def escanear():
         except Exception:
             continue
 
+    top_verdes = [x[1] for x in sorted(radar_verdes, key=lambda x: x[0])[:6]]
+    txt_radar = "\n".join(top_verdes) if top_verdes else "Ninguna en SuperTrend Verde."
+    bloque_radar = f"\n\n👀 <b>MÁS PEGADAS A SUPERTREND VERDE 🟩:</b>\n{txt_radar}{diag_xrp}"
+
     if alertas:
-        encabezado = f"🚀 <b>OPORTUNIDADES SPOT DETECTADAS (1D)</b>\nTotal hoy: {len(alertas)} monedas\n━━━━━━━━━━━━━━━━━━\n\n"
-        enviar_telegram(encabezado + "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:12]))
+        encabezado = f"🚀 <b>ALERTAS SPOT (HOY + VELA PREVIA)</b>\nTotal detectadas: {len(alertas)}\n━━━━━━━━━━━━━━━━━━\n\n"
+        cuerpo = "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:10])
+        enviar_telegram(encabezado + cuerpo + bloque_radar)
     else:
-        cercanas_ordenadas = [x[1] for x in sorted(cercanas, key=lambda x: x[0])[:5]]
-        texto_cercanas = "\n".join(cercanas_ordenadas) if cercanas_ordenadas else "Sin monedas cercanas al SuperTrend."
         enviar_telegram(
-            f"🔎 <b>Escaneo 1D completado (60 monedas)</b>\n"
-            f"Ninguna tocó zona hoy, pero estas son las más cercanas a su soporte de SuperTrend:\n\n{texto_cercanas}"
+            f"🔎 <b>Escaneo 1D (Hoy + Vela Previa completado)</b>\n"
+            f"Ninguna dio gatillo cerrado en las últimas 48h.{bloque_radar}"
         )
 
 if __name__ == "__main__":
