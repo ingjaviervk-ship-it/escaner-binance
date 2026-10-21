@@ -1,16 +1,20 @@
-name: Escaner Spot Diario (3 Veces al Dia)
+name: Bot Cuantitativo Cripto Telegram
 
 on:
   schedule:
-   # Se ejecuta a las 8:18 AM, 2:18 PM y 8:18 PM (Hora local Bolivia -04)
-    - cron: '18 12,18,0 * * *'
-  workflow_dispatch:
+    # 3 alertas diarias automáticas: 00:05 UTC (cierre oficial diario), 08:00 UTC y 16:00 UTC
+    - cron: '5 0,8,16 * * *'
+  workflow_dispatch: # Permite probarlo manualmente cuando quieras con un clic
+
+# PERMISO PARA GUARDAR TU SALDO Y TRADES AUTOMÁTICAMENTE EN GITHUB
+permissions:
+  contents: write
 
 jobs:
-  escanear-mercado:
+  escanear:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar codigo
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
       - name: Configurar Python
@@ -18,11 +22,23 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar librerias
-        run: pip install -r requirements.txt
+      - name: Instalar librerías
+        run: |
+          pip install requests pandas numpy
 
-      - name: Ejecutar escaner
+      - name: Ejecutar Escáner Cuantitativo
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python escaner.py
+          CAPITAL_INICIAL: 4000.0   # Tu capital inicial de $4,000 USD
+          RIESGO_MAX_PCT: 0.02      # Regla del 2% por trade
+        run: |
+          python bot_telegram_cuantitativo.py
+
+      # AUTOGUARDADO DEL SALDO Y POSICIONES
+      - name: Guardar saldo actualizado en GitHub
+        run: |
+          git config --global user.name "Bot Cuantitativo"
+          git config --global user.email "bot@trading.local"
+          git add estado_cuenta.json
+          git diff --staged --quiet || (git commit -m "Actualizar saldo y trades [skip ci]" && git push)
