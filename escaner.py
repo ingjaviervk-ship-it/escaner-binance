@@ -1,27 +1,76 @@
 import os
+import sys
+import json
 import requests
 import pandas as pd
 import numpy as np
 
+# Asegurar codificación UTF-8 en consola para emojis
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# =============================================================================
+# CONFIGURACIÓN Y ARCHIVO DE ESTADO PERSISTENTE
+# =============================================================================
 TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 
+# Tu capital inicial real configurado ($4,000 USD)
+CAPITAL_INICIAL_DEFAULT = float(os.environ.get("CAPITAL_INICIAL") or 4000.0)
+RIESGO_MAX_PCT = float(os.environ.get("RIESGO_MAX_PCT") or 0.02) # 2% institucional
+
 BASE_URL = "https://data-api.binance.vision/api/v3"
+STATE_FILE = os.path.join(os.path.dirname(__file__), "estado_cuenta.json")
+
+def cargar_estado():
+    """Carga el saldo acumulado real y las posiciones abiertas desde el JSON de GitHub."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Aviso al leer estado: {e}")
+            
+    return {
+        "capital_actual": CAPITAL_INICIAL_DEFAULT,
+        "capital_inicial": CAPITAL_INICIAL_DEFAULT,
+        "posiciones_abiertas": {},
+        "historial_cerrados": []
+    }
+
+def guardar_estado(estado):
+    """Guarda el saldo actualizado y las posiciones en el repositorio de GitHub."""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(estado, f, indent=4, ensure_ascii=False)
+        print(f"Estado de cuenta guardado exitosamente: Capital actual = ${estado['capital_actual']:,.2f} USD")
+    except Exception as e:
+        print(f"Error al guardar estado de cuenta: {e}")
 
 def enviar_telegram(mensaje):
+    """Envía mensaje con formato HTML a Telegram."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("\n[VISTA PREVIA DE ALERTA TELEGRAM]")
+        print(mensaje.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
+        return
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=12)
         if r.status_code != 200:
-            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}, timeout=10)
+            requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}, timeout=12)
     except Exception as e:
-        print(f"Error Telegram: {e}")
+        print(f"Error al enviar a Telegram: {e}")
 
 def obtener_top_monedas(limite=60):
+    """Filtra las mejores criptomonedas de Binance por volumen en USDT."""
     excluir = [
         'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 
-        'EURUSDT', 'PAXGUSDT', 'USD1USDT', 'USDEUSDT', 'BUSDUSDT'
+        'EURUSDT', 'PAXGUSDT', 'USD1USDT', 'USDEUSDT', 'BUSDUSDT', 'AEURUSDT'
     ]
     try:
         r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
@@ -35,247 +84,274 @@ def obtener_top_monedas(limite=60):
             ]
             pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
             lista = [p['symbol'] for p in pares_ordenados[:limite]]
-            for fijo in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "AVAXUSDT", "BNBUSDT"]:
+            for fijo in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"]:
                 if fijo not in lista:
                     lista.append(fijo)
             return lista
-    except Exception:
-        pass
-    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT"]
+    except Exception as e:
+        print(f"Error al obtener tickers de Binance: {e}")
+        
+    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"]
 
-def calcular_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def calcular_supertrend(df, period=10, multiplier=3.0):
-    """Calibrado exactamente con SUPERTREND(10,3) de la app de Binance"""
+def calcular_indicadores(df):
+    """Calcula EMA 50, EMA 100, EMA 200, ATR, CCI y Canales Donchian."""
+    close = df['close']
     high = df['high']
     low = df['low']
-    close = df['close']
+    
+    df['EMA50'] = close.ewm(span=50, adjust=False).mean()
+    df['EMA100'] = close.ewm(span=100, adjust=False).mean()
+    df['EMA200'] = close.ewm(span=200, adjust=False).mean()
     
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['ATR'] = tr.ewm(alpha=1/14, adjust=False).mean()
+    df['SMA_ATR'] = df['ATR'].rolling(20).mean()
     
-    # ATR de Wilder (RMA) identico al usado en Binance
-    atr = tr.ewm(alpha=1/period, adjust=False).mean()
+    tp = (high + low + close) / 3
+    sma_tp = tp.rolling(20).mean()
+    mad = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    df['CCI'] = (tp - sma_tp) / (0.015 * mad + 1e-10)
     
-    hl2 = (high + low) / 2
-    basic_ub = (hl2 + (multiplier * atr)).values
-    basic_lb = (hl2 - (multiplier * atr)).values
-    close_vals = close.values
-    
-    final_ub = np.zeros(len(df))
-    final_lb = np.zeros(len(df))
-    st = np.zeros(len(df))
-    trend = np.ones(len(df)) # 1 = Verde, -1 = Rojo
-    
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
-    
-    for i in range(1, len(df)):
-        # Banda superior
-        if basic_ub[i] < final_ub[i-1] or close_vals[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        # Banda inferior (Soporte Verde)
-        if basic_lb[i] > final_lb[i-1] or close_vals[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-            
-        # Direccion de tendencia evaluada en la vela actual (como en Binance)
-        if trend[i-1] == -1 and close_vals[i] > final_ub[i-1]:
-            trend[i] = 1
-        elif trend[i-1] == 1 and close_vals[i] < final_lb[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-            
-        st[i] = final_lb[i] if trend[i] == 1 else final_ub[i]
-        
-    df['ATR'] = atr
-    df['SuperTrend'] = st
-    df['ST_Trend'] = trend
+    df['High20'] = high.shift(1).rolling(20).max()
+    df['Low10'] = low.shift(1).rolling(10).min()
+    df['Low20'] = low.shift(1).rolling(20).min()
+    df['High10'] = high.shift(1).rolling(10).max()
     return df
 
-def detectar_soportes_resistencias(df):
-    soportes, resistencias = [], []
-    for i in range(3, len(df) - 2):
-        if df['low'].iloc[i] == df['low'].iloc[i-3:i+3].min():
-            soportes.append(df['low'].iloc[i])
-        if df['high'].iloc[i] == df['high'].iloc[i-3:i+3].max():
-            resistencias.append(df['high'].iloc[i])
-    return soportes, resistencias
+def calcular_gestion_capital(precio, stop_loss, capital_actual, riesgo_pct=RIESGO_MAX_PCT):
+    """Calcula el tamaño de la orden con la Opción 5 sobre el CAPITAL ACTUALIZADO."""
+    distancia_pct = abs(precio - stop_loss) / precio
+    if distancia_pct <= 0:
+        distancia_pct = 0.05
+        
+    riesgo_permitido_usd = capital_actual * riesgo_pct
+    tamano_posicion_usd = riesgo_permitido_usd / distancia_pct
+    
+    # Límite de seguridad: máximo el 40% del capital actual en un solo activo
+    max_permitido_usd = capital_actual * 0.40
+    tamano_final_usd = min(tamano_posicion_usd, max_permitido_usd)
+    
+    cantidad_monedas = tamano_final_usd / precio
+    efectivo_reserva_usd = max(0.0, capital_actual - tamano_final_usd)
+    
+    return {
+        'riesgo_usd': riesgo_permitido_usd,
+        'distancia_pct': distancia_pct * 100.0,
+        'tamano_usd': tamano_final_usd,
+        'tamano_monedas': cantidad_monedas,
+        'reserva_usd': efectivo_reserva_usd,
+        'pct_cuenta': (tamano_final_usd / capital_actual) * 100.0
+    }
 
-def detectar_patrones(hoy, ayer, soportes):
-    patrones = []
-    for nombre, v in [("Hoy", hoy), ("Vela Previa", ayer)]:
-        cuerpo = abs(v['close'] - v['open'])
-        rango = v['high'] - v['low']
-        mecha_inf = min(v['open'], v['close']) - v['low']
-        mecha_sup = v['high'] - max(v['open'], v['close'])
-        if rango > 0 and mecha_inf >= (cuerpo * 1.8) and mecha_inf > mecha_sup * 1.4:
-            patrones.append(f"🔨 Martillo ({nombre})")
-            break
-
-    if (ayer['close'] < ayer['open']) and (hoy['close'] > hoy['open']) and (hoy['close'] >= ayer['open']):
-        patrones.append("🕯 Envolvente Alcista")
-
-    for p in soportes[-3:]:
-        if abs(min(hoy['low'], ayer['low']) - p) / p <= 0.015 and hoy['close'] > p:
-            patrones.append("📐 Doble Piso (W)")
-            break
-    return patrones
-
-def escanear():
+def ejecutar_bot_inteligente():
+    estado = cargar_estado()
+    cap_actual = estado['capital_actual']
+    posiciones = estado.get('posiciones_abiertas', {})
+    
+    print("\n" + "="*80)
+    print(f"BOT CUANTITATIVO CON ESTADO PERSISTENTE EN GITHUB")
+    print(f"Capital Inicial: ${estado['capital_inicial']:,.2f} USD | Capital Actualizado: ${cap_actual:,.2f} USD")
+    print(f"Riesgo por Operación (2%): ${cap_actual * RIESGO_MAX_PCT:,.2f} USD | Posiciones Abiertas: {len(posiciones)}")
+    print("="*80)
+    
     monedas = obtener_top_monedas(60)
-    alertas = []
-    radar_verdes = []
-    diag_xrp = ""
-
-    for symbol in monedas:
+    alertas_entrada = []
+    alertas_salida = []
+    radar_seguimiento = []
+    
+    # -------------------------------------------------------------------------
+    # FASE 1: MONITOREO DE POSICIONES ABIERTAS (¿TOCÓ TRAILING STOP O SALIDA?)
+    # -------------------------------------------------------------------------
+    symbols_a_cerrar = []
+    for sym, pos in posiciones.items():
         try:
-            r = requests.get(f"{BASE_URL}/klines", params={"symbol": symbol, "interval": "1d", "limit": 120}, timeout=10)
+            r = requests.get(f"{BASE_URL}/ticker/price", params={"symbol": sym}, timeout=6)
+            if r.status_code == 200:
+                p_actual = float(r.json()['price'])
+                p_entrada = pos['precio_entrada']
+                sl_actual = pos['stop_loss']
+                trailing_stop = pos.get('trailing_stop', sl_actual)
+                highest_seen = max(pos.get('highest_price', p_entrada), p_actual)
+                pos['highest_price'] = highest_seen
+                
+                # Actualizar Trailing Stop (sube con cada nuevo máximo)
+                atr_ref = pos.get('atr_entry', p_entrada * 0.04)
+                nuevo_trailing = highest_seen - (2.5 * atr_ref)
+                if nuevo_trailing > trailing_stop:
+                    pos['trailing_stop'] = nuevo_trailing
+                    trailing_stop = nuevo_trailing
+                    
+                # Evaluar si tocó el Stop Loss o el Trailing Stop
+                if p_actual <= trailing_stop:
+                    pnl_dolares = (p_actual - p_entrada) * pos['cantidad_monedas']
+                    pnl_pct = (p_actual - p_entrada) / p_entrada * 100.0
+                    
+                    cap_actual += pnl_dolares
+                    estado['capital_actual'] = cap_actual
+                    symbols_a_cerrar.append(sym)
+                    
+                    icono_res = "🟢" if pnl_dolares > 0 else "🔴"
+                    alertas_salida.append(
+                        f"🚪 <b>CIERRE DE POSICIÓN: {sym}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🔹 <b>Estrategia:</b> {pos['metodo']}\n"
+                        f"💵 <b>Precio de Entrada:</b> ${p_entrada:,.4f}\n"
+                        f"🏁 <b>Precio de Salida:</b> ${p_actual:,.4f}\n"
+                        f"{icono_res} <b>Resultado:</b> {pnl_pct:+.2f}% (<b>{pnl_dolares:+,.2f} USD</b>)\n"
+                        f"💰 <b>NUEVO CAPITAL DISPONIBLE:</b> <b>${cap_actual:,.2f} USD</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━"
+                    )
+        except Exception as e:
+            print(f"Aviso al monitorear posición {sym}: {e}")
+            
+    for sym in symbols_a_cerrar:
+        estado['historial_cerrados'].append(posiciones[sym])
+        del posiciones[sym]
+        
+    # -------------------------------------------------------------------------
+    # FASE 2: ESCANEO DE NUEVAS OPORTUNIDADES (100% COMPRAS SPOT)
+    # -------------------------------------------------------------------------
+    for symbol in monedas:
+        if symbol in posiciones:
+            continue
+            
+        try:
+            url = f"{BASE_URL}/klines"
+            params = {"symbol": symbol, "interval": "1d", "limit": 220}
+            r = requests.get(url, params=params, timeout=8)
             if r.status_code != 200:
                 continue
                 
             df = pd.DataFrame(r.json(), columns=[
-                'time', 'open', 'high', 'low', 'close', 'vol', 
+                'time', 'open', 'high', 'low', 'close', 'vol',
                 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'
             ])
             for col in ['open', 'high', 'low', 'close', 'vol']:
                 df[col] = df[col].astype(float)
-
-            df = calcular_supertrend(df, period=10, multiplier=3.0)
-            df['RSI'] = calcular_rsi(df['close'], 14)
-
+                
+            df = calcular_indicadores(df)
             hoy = df.iloc[-1]
             ayer = df.iloc[-2]
-            
             precio = hoy['close']
-            min_2dias = min(hoy['low'], ayer['low'])
-            rsi = hoy['RSI']
-            st_hoy = hoy['SuperTrend']
-            st_ayer = ayer['SuperTrend']
-
-            if st_hoy <= 0:
-                continue
-
-            if symbol == "XRPUSDT":
-                color_xrp = "🟩 Verde" if hoy['ST_Trend'] == 1 else "🟥 Rojo"
-                diag_xrp = f"\n🔎 <b>Datos leídos en XRPUSDT:</b> Precio ${precio:.4f} | ST: ${st_hoy:.4f} ({color_xrp}) | Mín 48h: ${min_2dias:.4f} | RSI: {rsi:.1f}"
-
-            # RADAR: UNICAMENTE monedas con SuperTrend VERDE
-            if hoy['ST_Trend'] == 1 and precio >= st_hoy * 0.99:
-                dist_verde = (precio - st_hoy) / st_hoy
-                radar_verdes.append((abs(dist_verde) * 100, f"• <b>{symbol}</b> (${precio:.4f}) a <b>{dist_verde*100:+.2f}%</b> de ST Verde 🟩 (${st_hoy:.4f})"))
-
-            if rsi < 28:
-                continue
-
-            motivos = []
-
-            # MOTOR 1: SuperTrend VERDE (Permite mechazo de hasta -3.5% como el 1.2891 de XRP si el precio recupera)
-            toco_st_hoy = (hoy['ST_Trend'] == 1) and (-0.035 <= (hoy['low'] - st_hoy) / st_hoy <= 0.035)
-            toco_st_ayer = (ayer['ST_Trend'] == 1) and (-0.035 <= (ayer['low'] - st_ayer) / st_ayer <= 0.035)
-            sigue_sobre_st = (hoy['ST_Trend'] == 1) and (-0.005 <= (precio - st_hoy) / st_hoy <= 0.06)
-
-            if (toco_st_hoy or toco_st_ayer) and sigue_sobre_st and rsi <= 66:
-                momento = "Hoy" if toco_st_hoy else "Vela Previa"
-                motivos.append(f"🟩 Apoyo SuperTrend Verde ({momento}: ${st_hoy:.4f})")
-
-            # MOTOR 2: Retroceso Fibonacci 61.8% - 71.3% (Hoy + Vela Previa)
-            ventana = df.iloc[-65:]
-            min_impulso = ventana['low'].min()
-            idx_min = ventana['low'].idxmin()
-            ventana_post = df.loc[idx_min:]
-            max_impulso = ventana_post['high'].max()
-            rango = max_impulso - min_impulso
-
-            if rango > 0 and len(ventana_post) >= 4 and precio < max_impulso * 0.96:
-                fib_618 = max_impulso - (rango * 0.618)
-                fib_713 = max_impulso - (rango * 0.713)
-                fib_786 = max_impulso - (rango * 0.786)
-                
-                toco_fib_2dias = (fib_786 * 0.985 <= min_2dias <= fib_618 * 1.025) and (fib_786 <= precio <= fib_618 * 1.045)
-                if toco_fib_2dias:
-                    motivos.append(f"🎯 Zona Fib 61.8-71.3% (${fib_713:.4f} - ${fib_618:.4f})")
-
-            # MOTOR 3: Soportes y Resistencias (Hoy + Vela Previa)
-            soportes, resistencias = detectar_soportes_resistencias(df.iloc[-65:])
-            soporte_usado = False
-            for s in reversed(soportes):
-                toco_soporte = (-0.015 <= (hoy['low'] - s) / s <= 0.022) or (-0.015 <= (ayer['low'] - s) / s <= 0.022)
-                en_rebote = (-0.003 <= (precio - s) / s <= 0.05)
-                if toco_soporte and en_rebote:
-                    motivos.append(f"🧱 Rebote en Soporte (${s:.4f})")
-                    soporte_usado = True
-                    break
-
-            if not soporte_usado:
-                for res in reversed(resistencias):
-                    toco_retest = (-0.015 <= (hoy['low'] - res) / res <= 0.022) or (-0.015 <= (ayer['low'] - res) / res <= 0.022)
-                    en_rebote = (-0.003 <= (precio - res) / res <= 0.05)
-                    if toco_retest and en_rebote and df['high'].iloc[-8:-1].max() > res * 1.02:
-                        motivos.append(f"🔄 Retesteo Techo Roto (${res:.4f})")
-                        break
-
-            if motivos:
-                patrones = detectar_patrones(hoy, ayer, soportes)
-                txt_patron = f"\n🕯 <b>Patrón:</b> {' + '.join(patrones)}" if patrones else ""
-
-                atr = hoy['ATR']
-                stop_loss = min(min_2dias, precio - (1.2 * atr)) - (0.3 * atr)
-                riesgo = precio - stop_loss
-                if riesgo <= 0:
-                    stop_loss = precio - (1.5 * atr)
-                    riesgo = precio - stop_loss
-
-                techos_arriba = [r for r in resistencias if r > precio * 1.03]
-                techo_ref = min(techos_arriba) if techos_arriba else (precio + (atr * 3.0))
-
-                tp1 = precio + (riesgo * 2.0)
-                tp2 = max(techo_ref, precio + (riesgo * 3.0))
-
-                pct_sl = ((stop_loss - precio) / precio) * 100
-                pct_tp1 = ((tp1 - precio) / precio) * 100
-                pct_tp2 = ((tp2 - precio) / precio) * 100
-
-                etiqueta = "🔥 <b>CONFLUENCIA MULTIPLE</b>" if (len(motivos) > 1 or patrones) else "🟢 <b>SEÑAL SPOT 1D</b>"
-
-                alertas.append(
-                    f"{etiqueta}: <b>{symbol}</b>\n"
-                    f"🔹 <b>Precio Actual:</b> ${precio:.4f} <i>(Mín 48h: ${min_2dias:.4f})</i>\n"
-                    f"📊 <b>Motor:</b> {' + '.join(motivos)}{txt_patron}\n"
-                    f"📈 <b>RSI (1D):</b> {rsi:.1f} | <b>ST:</b> ${st_hoy:.4f}\n"
-                    f"🏛 <b>Próximo Techo:</b> ${techo_ref:.4f}\n"
-                    f"🛑 <b>Stop Loss:</b> ${stop_loss:.4f} ({pct_sl:.1f}%)\n"
-                    f"🎯 <b>Take Profit 1:</b> ${tp1:.4f} (+{pct_tp1:.1f}%)\n"
-                    f"🎯 <b>Take Profit 2:</b> ${tp2:.4f} (+{pct_tp2:.1f}%)"
-                )
+            atr = hoy['ATR']
+            
+            # Método 1: Donchian Breakout 20D (Spot)
+            if (precio > hoy['High20']) and (ayer['close'] <= ayer['High20']) and (precio > hoy['EMA100']):
+                sl = max(hoy['Low10'], precio - (2.5 * atr))
+                alertas_entrada.append({
+                    'symbol': symbol, 'metodo': 'Donchian Breakout 20D (Turtle)',
+                    'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🐢', 'precio': precio, 'stop_loss': sl, 'atr': atr
+                })
+            # Método 2: Golden Cross Institucional (Spot)
+            elif (hoy['EMA50'] > hoy['EMA200']) and (ayer['EMA50'] <= ayer['EMA200'] or (ayer['low'] <= hoy['EMA50']*1.01 and precio > hoy['EMA50'])) and (precio > hoy['EMA100']):
+                sl = precio - (2.5 * atr)
+                alertas_entrada.append({
+                    'symbol': symbol, 'metodo': 'Golden Cross Institucional',
+                    'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🏛️', 'precio': precio, 'stop_loss': sl, 'atr': atr
+                })
+            # Método 3: HobbieCode Bot Cuántico (Spot)
+            elif (precio > hoy['EMA100']) and (atr > hoy['SMA_ATR']) and (hoy['CCI'] > 0) and (ayer['CCI'] <= 0):
+                sl = precio - (2.5 * atr)
+                alertas_entrada.append({
+                    'symbol': symbol, 'metodo': 'HobbieCode Bot Cuántico',
+                    'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🎯', 'precio': precio, 'stop_loss': sl, 'atr': atr
+                })
+            else:
+                dist_max20 = (hoy['High20'] - precio) / precio * 100.0
+                if 0 < dist_max20 <= 2.5 and precio > hoy['EMA100']:
+                    radar_seguimiento.append((dist_max20, f"• <b>{symbol}</b> a <b>{dist_max20:.1f}%</b> de romper Máx 20D (${hoy['High20']:.4f})"))
         except Exception:
             continue
-
-    top_verdes = [x[1] for x in sorted(radar_verdes, key=lambda x: x[0])[:6]]
-    txt_radar = "\n".join(top_verdes) if top_verdes else "Ninguna en SuperTrend Verde."
-    bloque_radar = f"\n\n👀 <b>MÁS PEGADAS A SUPERTREND VERDE 🟩:</b>\n{txt_radar}{diag_xrp}"
-
-    if alertas:
-        encabezado = f"🚀 <b>ALERTAS SPOT (HOY + VELA PREVIA)</b>\nTotal detectadas: {len(alertas)}\n━━━━━━━━━━━━━━━━━━\n\n"
-        cuerpo = "\n\n━━━━━━━━━━━━━━━━━━\n\n".join(alertas[:10])
-        enviar_telegram(encabezado + cuerpo + bloque_radar)
-    else:
-        enviar_telegram(
-            f"🔎 <b>Escaneo 1D (Hoy + Vela Previa completado)</b>\n"
-            f"Ninguna dio gatillo cerrado en las últimas 48h.{bloque_radar}"
+            
+    # -------------------------------------------------------------------------
+    # FASE 3: ENVIAR MENSAJES Y GESTIONAR CUPOS (MÁXIMO 3 POSICIONES)
+    # -------------------------------------------------------------------------
+    for msg_salida in alertas_salida:
+        enviar_telegram(msg_salida)
+        
+    MAX_POSICIONES = 3
+    cupos_disponibles = max(0, MAX_POSICIONES - len(posiciones))
+    
+    if alertas_entrada and cupos_disponibles > 0:
+        alertas_a_ejecutar = alertas_entrada[:cupos_disponibles]
+        
+        for a in alertas_a_ejecutar:
+            gestion = calcular_gestion_capital(a['precio'], a['stop_loss'], capital_actual=cap_actual)
+            
+            posiciones[a['symbol']] = {
+                'metodo': a['metodo'],
+                'precio_entrada': a['precio'],
+                'cantidad_monedas': gestion['tamano_monedas'],
+                'inversion_usd': gestion['tamano_usd'],
+                'stop_loss': a['stop_loss'],
+                'trailing_stop': a['stop_loss'],
+                'highest_price': a['precio'],
+                'atr_entry': a['atr']
+            }
+            
+            msg = (
+                f"{a['icono']} <b>NUEVA SEÑAL SPOT: {a['symbol']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔹 <b>Estrategia:</b> {a['metodo']}\n"
+                f"🎯 <b>Acción:</b> <b>{a['tipo']}</b>\n"
+                f"💵 <b>Precio de Entrada:</b> ${a['precio']:,.4f}\n"
+                f"🛑 <b>Stop Loss:</b> ${a['stop_loss']:,.4f} <i>(-{gestion['distancia_pct']:.1f}%)</i>\n\n"
+                f"🧮 <b>GESTIÓN MONETARIA (OPCIÓN 5 - REGLA 2%):</b>\n"
+                f"• Capital Actual de la Cuenta: <b>${cap_actual:,.2f} USD</b>\n"
+                f"• Riesgo Máximo Asumido (2%): <b>${gestion['riesgo_usd']:,.2f} USD</b>\n"
+                f"• <b>Tamaño a Comprar:</b> <b>${gestion['tamano_usd']:,.2f} USD</b> ({gestion['pct_cuenta']:.1f}% de tu saldo)\n"
+                f"• <b>Cantidad en Monedas:</b> <b>{gestion['tamano_monedas']:.4f} {a['symbol'].replace('USDT', '')}</b>\n"
+                f"• Saldo en Reserva: <b>${gestion['reserva_usd']:,.2f} USD</b>\n"
+                f"• Cupos Ocupados: <b>{len(posiciones)} de {MAX_POSICIONES}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            enviar_telegram(msg)
+            
+        if len(alertas_entrada) > cupos_disponibles:
+            monedas_excedentes = [x['symbol'] for x in alertas_entrada[cupos_disponibles:]]
+            msg_excedente = (
+                f"⚠️ <b>CARTERA AL MÁXIMO DE CAPACIDAD ({len(posiciones)}/{MAX_POSICIONES})</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Se detectaron señales válidas en: <b>{', '.join(monedas_excedentes)}</b>\n"
+                f"🛡 No se abren para no sobreexponer tu cuenta de ${cap_actual:,.2f} USD.\n"
+                f"Quedan en lista de espera hasta que se cierre una posición activa.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            enviar_telegram(msg_excedente)
+            
+    elif alertas_entrada and cupos_disponibles == 0:
+        monedas_excedentes = [x['symbol'] for x in alertas_entrada[:4]]
+        msg_full = (
+            f"⚠️ <b>CARTERA COMPLETA ({len(posiciones)}/{MAX_POSICIONES} POSICIONES ACTIVAS)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Se detectaron señales en: <b>{', '.join(monedas_excedentes)}</b>\n"
+            f"🛡 Tu capital está 100% protegido en tus 3 posiciones actuales.\n"
+            f"No se realizan nuevas compras hasta que el bot cierre una posición.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━"
         )
+        enviar_telegram(msg_full)
+        
+    elif not alertas_salida:
+        top_radar = [x[1] for x in sorted(radar_seguimiento, key=lambda x: x[0])[:6]]
+        txt_radar = "\n".join(top_radar) if top_radar else "Ninguna moneda en zona de ruptura."
+        
+        msg_quiet = (
+            f"🔎 <b>INFORME DE MERCADO ({len(monedas)} MONEDAS)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Capital Actual:</b> ${cap_actual:,.2f} USD\n"
+            f"📊 <b>Posiciones Abiertas:</b> {len(posiciones)} de {MAX_POSICIONES}\n"
+            f"✅ 0 entradas nuevas confirmadas en este escaneo.\n\n"
+            f"👀 <b>RADAR (Más cerca de romper Máx 20D):</b>\n"
+            f"{txt_radar}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        enviar_telegram(msg_quiet)
+        
+    estado['posiciones_abiertas'] = posiciones
+    guardar_estado(estado)
 
 if __name__ == "__main__":
-    escanear()
+    ejecutar_bot_inteligente()
