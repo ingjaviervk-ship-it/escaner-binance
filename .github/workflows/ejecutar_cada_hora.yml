@@ -33,7 +33,7 @@ jobs:
           CAPITAL_INICIAL: 4000.0   # Tu capital inicial de $4,000 USD
           RIESGO_MAX_PCT: 0.02      # Regla del 2% por trade
         run: |
-          python python escaner.py
+          python escaner.py
 
       # AUTOGUARDADO DEL SALDO Y POSICIONES
       - name: Guardar saldo actualizado en GitHub
