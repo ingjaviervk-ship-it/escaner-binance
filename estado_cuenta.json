@@ -1,17 +1,7 @@
 {
-    "capital_actual": 4000.0,
+    "capital_actual": 3948.6263861100906,
     "capital_inicial": 4000.0,
     "posiciones_abiertas": {
-        "BTCUSDT": {
-            "metodo": "Golden Cross Institucional",
-            "precio_entrada": 82817.41,
-            "cantidad_monedas": 0.016273798047379648,
-            "inversion_usd": 1347.7538051470399,
-            "stop_loss": 77901.53235625099,
-            "trailing_stop": 79716.13235625098,
-            "highest_price": 84632.01,
-            "atr_entry": 1966.3510574996046
-        },
         "ZECUSDT": {
             "metodo": "Golden Cross Institucional",
             "precio_entrada": 1262.39,
@@ -31,7 +21,28 @@
             "trailing_stop": 700.7515629516835,
             "highest_price": 749.61,
             "atr_entry": 19.543374819326598
+        },
+        "BMTUSDT": {
+            "metodo": "Donchian Breakout 20D (Turtle)",
+            "precio_entrada": 0.03759,
+            "cantidad_monedas": 6601.46388300477,
+            "inversion_usd": 248.14902736214927,
+            "stop_loss": 0.025627118869117234,
+            "trailing_stop": 0.025627118869117234,
+            "highest_price": 0.03759,
+            "atr_entry": 0.004785152452353106
         }
     },
-    "historial_cerrados": []
+    "historial_cerrados": [
+        {
+            "metodo": "Golden Cross Institucional",
+            "precio_entrada": 82817.41,
+            "cantidad_monedas": 0.016273798047379648,
+            "inversion_usd": 1347.7538051470399,
+            "stop_loss": 77901.53235625099,
+            "trailing_stop": 79716.13235625098,
+            "highest_price": 84632.01,
+            "atr_entry": 1966.3510574996046
+        }
+    ]
 }
