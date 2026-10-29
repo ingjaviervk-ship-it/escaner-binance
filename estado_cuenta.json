@@ -18,8 +18,8 @@
             "cantidad_monedas": 1.637383527452736,
             "inversion_usd": 1213.972521088733,
             "stop_loss": 692.5515629516834,
-            "trailing_stop": 702.6415629516835,
-            "highest_price": 751.5,
+            "trailing_stop": 708.1415629516835,
+            "highest_price": 757.0,
             "atr_entry": 19.543374819326598
         },
         "BMTUSDT": {
