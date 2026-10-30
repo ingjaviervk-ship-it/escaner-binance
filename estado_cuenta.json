@@ -1,5 +1,5 @@
 {
-    "capital_actual": 3778.9125611908116,
+    "capital_actual": 3661.468436874317,
     "capital_inicial": 4000.0,
     "posiciones_abiertas": {
         "ZECUSDT": {
@@ -12,25 +12,25 @@
             "highest_price": 1346.3,
             "atr_entry": 114.4316188235855
         },
-        "TRXUSDT": {
-            "metodo": "Golden Cross Institucional",
-            "precio_entrada": 0.3578,
-            "cantidad_monedas": 4224.608788363121,
-            "inversion_usd": 1511.5650244763247,
-            "stop_loss": 0.3425130987025883,
-            "trailing_stop": 0.3425130987025883,
-            "highest_price": 0.3578,
-            "atr_entry": 0.0061147605189646945
-        },
         "RLUSDUSDT": {
             "metodo": "Golden Cross Institucional",
             "precio_entrada": 1.0014,
             "cantidad_monedas": 1509.45179196757,
             "inversion_usd": 1511.5650244763247,
             "stop_loss": 1.0000124120860123,
-            "trailing_stop": 1.0000124120860123,
-            "highest_price": 1.0014,
+            "trailing_stop": 1.0001124120860123,
+            "highest_price": 1.0015,
             "atr_entry": 0.0005550351655951261
+        },
+        "NEARUSDT": {
+            "metodo": "Golden Cross Institucional",
+            "precio_entrada": 4.351,
+            "cantidad_monedas": 60.03578646427752,
+            "inversion_usd": 261.2157069060715,
+            "stop_loss": 3.131238037173724,
+            "trailing_stop": 3.131238037173724,
+            "highest_price": 4.351,
+            "atr_entry": 0.4879047851305105
         }
     },
     "historial_cerrados": [
@@ -63,6 +63,16 @@
             "trailing_stop": 0.025627118869117234,
             "highest_price": 0.03759,
             "atr_entry": 0.004785152452353106
+        },
+        {
+            "metodo": "Golden Cross Institucional",
+            "precio_entrada": 0.3578,
+            "cantidad_monedas": 4224.608788363121,
+            "inversion_usd": 1511.5650244763247,
+            "stop_loss": 0.3425130987025883,
+            "trailing_stop": 0.3425130987025883,
+            "highest_price": 0.3578,
+            "atr_entry": 0.0061147605189646945
         }
     ]
 }
