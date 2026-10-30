@@ -1,5 +1,5 @@
 {
-    "capital_actual": 3948.6263861100906,
+    "capital_actual": 3778.9125611908116,
     "capital_inicial": 4000.0,
     "posiciones_abiertas": {
         "ZECUSDT": {
@@ -12,25 +12,25 @@
             "highest_price": 1346.3,
             "atr_entry": 114.4316188235855
         },
-        "BNBUSDT": {
+        "TRXUSDT": {
             "metodo": "Golden Cross Institucional",
-            "precio_entrada": 741.41,
-            "cantidad_monedas": 1.637383527452736,
-            "inversion_usd": 1213.972521088733,
-            "stop_loss": 692.5515629516834,
-            "trailing_stop": 708.1415629516835,
-            "highest_price": 757.0,
-            "atr_entry": 19.543374819326598
+            "precio_entrada": 0.3578,
+            "cantidad_monedas": 4224.608788363121,
+            "inversion_usd": 1511.5650244763247,
+            "stop_loss": 0.3425130987025883,
+            "trailing_stop": 0.3425130987025883,
+            "highest_price": 0.3578,
+            "atr_entry": 0.0061147605189646945
         },
-        "BMTUSDT": {
-            "metodo": "Donchian Breakout 20D (Turtle)",
-            "precio_entrada": 0.03759,
-            "cantidad_monedas": 6601.46388300477,
-            "inversion_usd": 248.14902736214927,
-            "stop_loss": 0.025627118869117234,
-            "trailing_stop": 0.025627118869117234,
-            "highest_price": 0.03759,
-            "atr_entry": 0.004785152452353106
+        "RLUSDUSDT": {
+            "metodo": "Golden Cross Institucional",
+            "precio_entrada": 1.0014,
+            "cantidad_monedas": 1509.45179196757,
+            "inversion_usd": 1511.5650244763247,
+            "stop_loss": 1.0000124120860123,
+            "trailing_stop": 1.0000124120860123,
+            "highest_price": 1.0014,
+            "atr_entry": 0.0005550351655951261
         }
     },
     "historial_cerrados": [
@@ -43,6 +43,26 @@
             "trailing_stop": 79716.13235625098,
             "highest_price": 84632.01,
             "atr_entry": 1966.3510574996046
+        },
+        {
+            "metodo": "Golden Cross Institucional",
+            "precio_entrada": 741.41,
+            "cantidad_monedas": 1.637383527452736,
+            "inversion_usd": 1213.972521088733,
+            "stop_loss": 692.5515629516834,
+            "trailing_stop": 708.1415629516835,
+            "highest_price": 757.0,
+            "atr_entry": 19.543374819326598
+        },
+        {
+            "metodo": "Donchian Breakout 20D (Turtle)",
+            "precio_entrada": 0.03759,
+            "cantidad_monedas": 6601.46388300477,
+            "inversion_usd": 248.14902736214927,
+            "stop_loss": 0.025627118869117234,
+            "trailing_stop": 0.025627118869117234,
+            "highest_price": 0.03759,
+            "atr_entry": 0.004785152452353106
         }
     ]
 }
