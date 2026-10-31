@@ -5,7 +5,6 @@ import requests
 import pandas as pd
 import numpy as np
 
-# Asegurar codificación UTF-8 en consola para emojis
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(encoding='utf-8')
@@ -18,19 +17,36 @@ if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
 TELEGRAM_TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
 TELEGRAM_CHAT_ID = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
 
-# Tu capital inicial real configurado ($4,000 USD)
 CAPITAL_INICIAL_DEFAULT = float(os.environ.get("CAPITAL_INICIAL") or 4000.0)
-RIESGO_MAX_PCT = float(os.environ.get("RIESGO_MAX_PCT") or 0.02) # 2% institucional
+RIESGO_MAX_PCT = float(os.environ.get("RIESGO_MAX_PCT") or 0.02) # Regla del 2%
 
 BASE_URL = "https://data-api.binance.vision/api/v3"
 STATE_FILE = os.path.join(os.path.dirname(__file__), "estado_cuenta.json")
 
+# =============================================================================
+# UNIVERSO EXCLUSIVO: 27 CRIPTOMONEDAS OFICIALES Y CONSOLIDADAS DE BINANCE
+# =============================================================================
+MONEDAS_OFICIALES = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT",
+    "NEARUSDT", "SUIUSDT", "APTUSDT", "DOTUSDT", "ATOMUSDT",
+    "UNIUSDT", "AAVEUSDT", "RENDERUSDT", "TAOUSDT", "ZECUSDT",
+    "OPUSDT", "ARBUSDT", "XLMUSDT", "DASHUSDT", "BATUSDT",
+    "XVSUSDT", "ONEUSDT"
+]
+
 def cargar_estado():
-    """Carga el saldo acumulado real y las posiciones abiertas desde el JSON de GitHub."""
+    """Carga el saldo y filtra cualquier moneda que no pertenezca a la lista oficial."""
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if "posiciones_abiertas" in data:
+                    data["posiciones_abiertas"] = {
+                        k: v for k, v in data["posiciones_abiertas"].items() 
+                        if "USD" not in k.replace("USDT", "") and k in MONEDAS_OFICIALES
+                    }
+                return data
         except Exception as e:
             print(f"Aviso al leer estado: {e}")
             
@@ -42,7 +58,7 @@ def cargar_estado():
     }
 
 def guardar_estado(estado):
-    """Guarda el saldo actualizado y las posiciones en el repositorio de GitHub."""
+    """Guarda el saldo actualizado y las posiciones en GitHub."""
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(estado, f, indent=4, ensure_ascii=False)
@@ -53,7 +69,7 @@ def guardar_estado(estado):
 def enviar_telegram(mensaje):
     """Envía mensaje con formato HTML a Telegram."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("\n[VISTA PREVIA DE ALERTA TELEGRAM]")
+        print("\n[VISTA PREVIA TELEGRAM]")
         print(mensaje.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
         return
         
@@ -66,35 +82,8 @@ def enviar_telegram(mensaje):
     except Exception as e:
         print(f"Error al enviar a Telegram: {e}")
 
-def obtener_top_monedas(limite=60):
-    """Filtra las mejores criptomonedas de Binance por volumen en USDT."""
-    excluir = [
-        'USDCUSDT', 'FDUSDUSDT', 'TUSDUSDT', 'USDPUSDT', 'DAIUSDT', 
-        'EURUSDT', 'PAXGUSDT', 'USD1USDT', 'USDEUSDT', 'BUSDUSDT', 'AEURUSDT'
-    ]
-    try:
-        r = requests.get(f"{BASE_URL}/ticker/24hr", timeout=10)
-        if r.status_code == 200:
-            datos = r.json()
-            pares_usdt = [
-                d for d in datos 
-                if d['symbol'].endswith('USDT') 
-                and d['symbol'] not in excluir
-                and not any(x in d['symbol'] for x in ['UPUSDT', 'DOWNUSDT', 'BULL', 'BEAR'])
-            ]
-            pares_ordenados = sorted(pares_usdt, key=lambda x: float(x['quoteVolume']), reverse=True)
-            lista = [p['symbol'] for p in pares_ordenados[:limite]]
-            for fijo in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"]:
-                if fijo not in lista:
-                    lista.append(fijo)
-            return lista
-    except Exception as e:
-        print(f"Error al obtener tickers de Binance: {e}")
-        
-    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT"]
-
 def calcular_indicadores(df):
-    """Calcula EMA 50, EMA 100, EMA 200, ATR, CCI y Canales Donchian."""
+    """Calcula EMAs institucionales, ATR, CCI y Canales Donchian."""
     close = df['close']
     high = df['high']
     low = df['low']
@@ -117,20 +106,24 @@ def calcular_indicadores(df):
     
     df['High20'] = high.shift(1).rolling(20).max()
     df['Low10'] = low.shift(1).rolling(10).min()
-    df['Low20'] = low.shift(1).rolling(20).min()
-    df['High10'] = high.shift(1).rolling(10).max()
     return df
 
 def calcular_gestion_capital(precio, stop_loss, capital_actual, riesgo_pct=RIESGO_MAX_PCT):
-    """Calcula el tamaño de la orden con la Opción 5 sobre el CAPITAL ACTUALIZADO."""
+    """Calcula la posición con la Opción 5 (Riesgo Fijo 2%) y límites seguros."""
     distancia_pct = abs(precio - stop_loss) / precio
-    if distancia_pct <= 0:
-        distancia_pct = 0.05
+    
+    # Blindaje técnico: limitar distancia entre 3% y 15% para que Binance siempre lo acepte
+    if distancia_pct < 0.03:
+        distancia_pct = 0.03
+        stop_loss = precio * (1.0 - distancia_pct)
+    elif distancia_pct > 0.15:
+        distancia_pct = 0.15
+        stop_loss = precio * (1.0 - distancia_pct)
         
     riesgo_permitido_usd = capital_actual * riesgo_pct
     tamano_posicion_usd = riesgo_permitido_usd / distancia_pct
     
-    # Límite de seguridad: máximo el 40% del capital actual en un solo activo
+    # Máximo el 40% del capital actual en un solo activo
     max_permitido_usd = capital_actual * 0.40
     tamano_final_usd = min(tamano_posicion_usd, max_permitido_usd)
     
@@ -142,6 +135,7 @@ def calcular_gestion_capital(precio, stop_loss, capital_actual, riesgo_pct=RIESG
         'distancia_pct': distancia_pct * 100.0,
         'tamano_usd': tamano_final_usd,
         'tamano_monedas': cantidad_monedas,
+        'stop_loss_ajustado': stop_loss,
         'reserva_usd': efectivo_reserva_usd,
         'pct_cuenta': (tamano_final_usd / capital_actual) * 100.0
     }
@@ -152,21 +146,20 @@ def ejecutar_bot_inteligente():
     posiciones = estado.get('posiciones_abiertas', {})
     
     print("\n" + "="*80)
-    print(f"BOT CUANTITATIVO CON ESTADO PERSISTENTE EN GITHUB")
-    print(f"Capital Inicial: ${estado['capital_inicial']:,.2f} USD | Capital Actualizado: ${cap_actual:,.2f} USD")
-    print(f"Riesgo por Operación (2%): ${cap_actual * RIESGO_MAX_PCT:,.2f} USD | Posiciones Abiertas: {len(posiciones)}")
+    print(f"BOT CUANTITATIVO SPOT - 27 CRIPTOMONEDAS CONSOLIDADAS")
+    print(f"Capital Inicial: ${estado['capital_inicial']:,.2f} USD | Capital Actual: ${cap_actual:,.2f} USD")
+    print(f"Riesgo por Operación (2%): ${cap_actual * RIESGO_MAX_PCT:,.2f} USD | Posiciones Abiertas: {len(posiciones)}/3")
     print("="*80)
     
-    monedas = obtener_top_monedas(60)
     alertas_entrada = []
     alertas_salida = []
     radar_seguimiento = []
     
     # -------------------------------------------------------------------------
-    # FASE 1: MONITOREO DE POSICIONES ABIERTAS (¿TOCÓ TRAILING STOP O SALIDA?)
+    # FASE 1: MONITOREO DE POSICIONES ABIERTAS (¿TOCÓ TRAILING STOP O SL?)
     # -------------------------------------------------------------------------
     symbols_a_cerrar = []
-    for sym, pos in posiciones.items():
+    for sym, pos in list(posiciones.items()):
         try:
             r = requests.get(f"{BASE_URL}/ticker/price", params={"symbol": sym}, timeout=6)
             if r.status_code == 200:
@@ -177,14 +170,14 @@ def ejecutar_bot_inteligente():
                 highest_seen = max(pos.get('highest_price', p_entrada), p_actual)
                 pos['highest_price'] = highest_seen
                 
-                # Actualizar Trailing Stop (sube con cada nuevo máximo)
+                # Subir Trailing Stop con nuevos máximos
                 atr_ref = pos.get('atr_entry', p_entrada * 0.04)
                 nuevo_trailing = highest_seen - (2.5 * atr_ref)
                 if nuevo_trailing > trailing_stop:
                     pos['trailing_stop'] = nuevo_trailing
                     trailing_stop = nuevo_trailing
                     
-                # Evaluar si tocó el Stop Loss o el Trailing Stop
+                # Evaluar salida
                 if p_actual <= trailing_stop:
                     pnl_dolares = (p_actual - p_entrada) * pos['cantidad_monedas']
                     pnl_pct = (p_actual - p_entrada) / p_entrada * 100.0
@@ -212,9 +205,9 @@ def ejecutar_bot_inteligente():
         del posiciones[sym]
         
     # -------------------------------------------------------------------------
-    # FASE 2: ESCANEO DE NUEVAS OPORTUNIDADES (100% COMPRAS SPOT)
+    # FASE 2: ESCANEO DE SEÑALES EN LAS 27 CRIPTOMONEDAS
     # -------------------------------------------------------------------------
-    for symbol in monedas:
+    for symbol in MONEDAS_OFICIALES:
         if symbol in posiciones:
             continue
             
@@ -235,29 +228,42 @@ def ejecutar_bot_inteligente():
             df = calcular_indicadores(df)
             hoy = df.iloc[-1]
             ayer = df.iloc[-2]
+            antier = df.iloc[-3]
             precio = hoy['close']
             atr = hoy['ATR']
             
-            # Método 1: Donchian Breakout 20D (Spot)
+            # 1. Donchian Breakout 20D (Ruptura del máximo de 20 días)
             if (precio > hoy['High20']) and (ayer['close'] <= ayer['High20']) and (precio > hoy['EMA100']):
                 sl = max(hoy['Low10'], precio - (2.5 * atr))
                 alertas_entrada.append({
                     'symbol': symbol, 'metodo': 'Donchian Breakout 20D (Turtle)',
                     'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🐢', 'precio': precio, 'stop_loss': sl, 'atr': atr
                 })
-            # Método 2: Golden Cross Institucional (Spot)
-            elif (hoy['EMA50'] > hoy['EMA200']) and (ayer['EMA50'] <= ayer['EMA200'] or (ayer['low'] <= hoy['EMA50']*1.01 and precio > hoy['EMA50'])) and (precio > hoy['EMA100']):
+                
+            # 2. Golden Cross Institucional (Cruce fresco o Rebote confirmado en EMA 50)
+            cruce_fresco = (hoy['EMA50'] > hoy['EMA200']) and (ayer['EMA50'] <= ayer['EMA200'] or antier['EMA50'] <= antier['EMA200'])
+            rebote_confirmado = (
+                (hoy['EMA50'] > hoy['EMA200']) and 
+                (precio > hoy['EMA100']) and 
+                (precio > hoy['EMA50']) and 
+                (hoy['close'] > hoy['open']) and
+                (ayer['low'] <= ayer['EMA50'] * 1.008 or hoy['low'] <= hoy['EMA50']) and
+                (ayer['close'] <= ayer['open'] or ayer['close'] <= ayer['EMA50'])
+            )
+            
+            if (cruce_fresco or rebote_confirmado) and (precio > hoy['EMA100']):
                 sl = precio - (2.5 * atr)
                 alertas_entrada.append({
                     'symbol': symbol, 'metodo': 'Golden Cross Institucional',
                     'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🏛️', 'precio': precio, 'stop_loss': sl, 'atr': atr
                 })
-            # Método 3: HobbieCode Bot Cuántico (Spot)
+                
+            # 3. HobbieCode Cuántico (Impulso ATR + CCI > 0)
             elif (precio > hoy['EMA100']) and (atr > hoy['SMA_ATR']) and (hoy['CCI'] > 0) and (ayer['CCI'] <= 0):
                 sl = precio - (2.5 * atr)
                 alertas_entrada.append({
                     'symbol': symbol, 'metodo': 'HobbieCode Bot Cuántico',
-                    'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '🎯', 'precio': precio, 'stop_loss': sl, 'atr': atr
+                    'tipo': '🟢 COMPRA SPOT / LONG', 'icono': '⚡', 'precio': precio, 'stop_loss': sl, 'atr': atr
                 })
             else:
                 dist_max20 = (hoy['High20'] - precio) / precio * 100.0
@@ -267,7 +273,7 @@ def ejecutar_bot_inteligente():
             continue
             
     # -------------------------------------------------------------------------
-    # FASE 3: ENVIAR MENSAJES Y GESTIONAR CUPOS (MÁXIMO 3 POSICIONES)
+    # FASE 3: MENSAJES Y GESTIÓN DE CUPOS (MÁXIMO 3 POSICIONES)
     # -------------------------------------------------------------------------
     for msg_salida in alertas_salida:
         enviar_telegram(msg_salida)
@@ -275,19 +281,21 @@ def ejecutar_bot_inteligente():
     MAX_POSICIONES = 3
     cupos_disponibles = max(0, MAX_POSICIONES - len(posiciones))
     
+    # Nuevas compras si hay cupo libre
     if alertas_entrada and cupos_disponibles > 0:
         alertas_a_ejecutar = alertas_entrada[:cupos_disponibles]
         
         for a in alertas_a_ejecutar:
             gestion = calcular_gestion_capital(a['precio'], a['stop_loss'], capital_actual=cap_actual)
+            sl_final = gestion['stop_loss_ajustado']
             
             posiciones[a['symbol']] = {
                 'metodo': a['metodo'],
                 'precio_entrada': a['precio'],
                 'cantidad_monedas': gestion['tamano_monedas'],
                 'inversion_usd': gestion['tamano_usd'],
-                'stop_loss': a['stop_loss'],
-                'trailing_stop': a['stop_loss'],
+                'stop_loss': sl_final,
+                'trailing_stop': sl_final,
                 'highest_price': a['precio'],
                 'atr_entry': a['atr']
             }
@@ -298,7 +306,7 @@ def ejecutar_bot_inteligente():
                 f"🔹 <b>Estrategia:</b> {a['metodo']}\n"
                 f"🎯 <b>Acción:</b> <b>{a['tipo']}</b>\n"
                 f"💵 <b>Precio de Entrada:</b> ${a['precio']:,.4f}\n"
-                f"🛑 <b>Stop Loss:</b> ${a['stop_loss']:,.4f} <i>(-{gestion['distancia_pct']:.1f}%)</i>\n\n"
+                f"🛑 <b>Stop Loss:</b> ${sl_final:,.4f} <i>(-{gestion['distancia_pct']:.1f}%)</i>\n\n"
                 f"🧮 <b>GESTIÓN MONETARIA (OPCIÓN 5 - REGLA 2%):</b>\n"
                 f"• Capital Actual de la Cuenta: <b>${cap_actual:,.2f} USD</b>\n"
                 f"• Riesgo Máximo Asumido (2%): <b>${gestion['riesgo_usd']:,.2f} USD</b>\n"
@@ -316,41 +324,30 @@ def ejecutar_bot_inteligente():
                 f"⚠️ <b>CARTERA AL MÁXIMO DE CAPACIDAD ({len(posiciones)}/{MAX_POSICIONES})</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Se detectaron señales válidas en: <b>{', '.join(monedas_excedentes)}</b>\n"
-                f"🛡 No se abren para no sobreexponer tu cuenta de ${cap_actual:,.2f} USD.\n"
+                f"🛡️ No se abren para no sobreexponer tu cuenta de ${cap_actual:,.2f} USD.\n"
                 f"Quedan en lista de espera hasta que se cierre una posición activa.\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             enviar_telegram(msg_excedente)
             
+    # Si la cartera está llena pero se detectaron señales (para tu monitoreo)
     elif alertas_entrada and cupos_disponibles == 0:
-        monedas_excedentes = [x['symbol'] for x in alertas_entrada[:4]]
+        monedas_detectadas = [x['symbol'] for x in alertas_entrada]
         msg_full = (
-            f"⚠️ <b>CARTERA COMPLETA ({len(posiciones)}/{MAX_POSICIONES} POSICIONES ACTIVAS)</b>\n"
+            f"⚠️ <b>CARTERA AL MÁXIMO ({len(posiciones)}/{MAX_POSICIONES} POSICIONES ACTIVAS)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Se detectaron señales en: <b>{', '.join(monedas_excedentes)}</b>\n"
-            f"🛡 Tu capital está 100% protegido en tus 3 posiciones actuales.\n"
-            f"No se realizan nuevas compras hasta que el bot cierre una posición.\n"
+            f"Se detectaron señales en: <b>{', '.join(monedas_detectadas)}</b>\n"
+            f"🛡️ Tu capital está 100% protegido en tus 3 posiciones actuales.\n"
+            f"Quedan en observación mientras monitoreamos el sistema.\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         enviar_telegram(msg_full)
         
     elif not alertas_salida:
-        top_radar = [x[1] for x in sorted(radar_seguimiento, key=lambda x: x[0])[:6]]
-        txt_radar = "\n".join(top_radar) if top_radar else "Ninguna moneda en zona de ruptura."
+        top_radar = [x[1] for x in sorted(radar_seguimiento, key=lambda x: x[0])[:5]]
+        txt_radar = "\n".join(top_radar) if top_radar else "Ninguna moneda cerca de romper Máx 20D."
+        print(f"Escaneo finalizado sin nuevas señales. Radar:\n{txt_radar}")
         
-        msg_quiet = (
-            f"🔎 <b>INFORME DE MERCADO ({len(monedas)} MONEDAS)</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>Capital Actual:</b> ${cap_actual:,.2f} USD\n"
-            f"📊 <b>Posiciones Abiertas:</b> {len(posiciones)} de {MAX_POSICIONES}\n"
-            f"✅ 0 entradas nuevas confirmadas en este escaneo.\n\n"
-            f"👀 <b>RADAR (Más cerca de romper Máx 20D):</b>\n"
-            f"{txt_radar}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        enviar_telegram(msg_quiet)
-        
-    estado['posiciones_abiertas'] = posiciones
     guardar_estado(estado)
 
 if __name__ == "__main__":
